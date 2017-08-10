@@ -559,3 +559,6 @@
 - added "ez-grammar" example program
     examples/ez-grammar.ss, examples/ez-grammar-test.ss,
     examples/Makefile, examples.ms
+- added support for Microsoft Visual Studio 2017 on Windows
+    BUILDING, c/Mf-a6nt, c/Mf-ta6nt, c/vs.bat,
+    mats/Mf-a6nt, mats/Mf-ta6nt, mats/ftype.ms
