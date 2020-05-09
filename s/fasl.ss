@@ -1,4 +1,3 @@
-"fasl.ss"
 ;;; fasl.ss
 ;;; Copyright 1984-2017 Cisco Systems, Inc.
 ;;; 
@@ -68,6 +67,9 @@
 (define bld-record
   (lambda (x t a?)
     (unless (eq? x #!base-rtd)
+      (when (record-type-descriptor? x)
+        ; fasl representation for record-type-descriptor includes uid separately and as part of the record
+        (bld (record-type-uid x) t a?))
       (really-bld-record x t a?))))
 
 (define really-bld-record
@@ -153,9 +155,12 @@
         [(pair? x) (bld-graph x t a? bld-pair)]
         [(vector? x) (bld-graph x t a? bld-vector)]
         [(or (symbol? x) (string? x)) (bld-graph x t a? bld-simple)]
+        ; this check must go before $record? check
         [(and (annotation? x) (not a?))
          (bld (annotation-stripped x) t a?)]
+        ; this check must go before $record? check
         [(eq-hashtable? x) (bld-graph x t a? bld-ht)]
+        ; this check must go before $record? check
         [(symbol-hashtable? x) (bld-graph x t a? bld-ht)]
         [($record? x) (bld-graph x t a? bld-record)]
         [(box? x) (bld-graph x t a? bld-box)]
@@ -296,7 +301,7 @@
             (wrf-bytevector-loop (fx+ i 1))))))))
 
 ; Written as: fasl-tag rtd field ...
-(module (wrf-record really-wrf-record)
+(module (wrf-record really-wrf-record wrf-annotation)
   (define maybe-remake-rtd
     (lambda (rtd)
       (if (eq? (machine-type) ($target-machine))
@@ -423,10 +428,22 @@
       (cond
         [(record-type-descriptor? x)
          (put-u8 p (constant fasl-type-rtd))
+         (wrf (record-type-uid x) p t a?)
          (wrf-fields (maybe-remake-rtd x) p t a?)]
         [else
          (put-u8 p (constant fasl-type-record))
-         (wrf-fields x p t a?)]))))
+         (wrf-fields x p t a?)])))
+
+  (define wrf-annotation
+    (lambda (x p t a?)
+      (define maybe-remake-annotation
+        (lambda (x a?)
+          (if (fx= (annotation-flags x) a?)
+              x
+              (make-annotation (annotation-expression x) (annotation-source x) (annotation-stripped x) a?))))
+      (put-u8 p (constant fasl-type-record))
+      (wrf-fields (maybe-remake-annotation x a?) p t a?)))
+)
 
 (define wrf-eqht
   (lambda (x p t a?)
@@ -543,11 +560,16 @@
          [(string? x) (wrf-graph x p t a? wrf-string)]
          [(fxvector? x) (wrf-graph x p t a? wrf-fxvector)]
          [(bytevector? x) (wrf-graph x p t a? wrf-bytevector)]
-         [(and (annotation? x) (not a?))
-          (wrf (annotation-stripped x) p t a?)]
-        ; this check must go before $record? check
+         ; this check must go before $record? check
+         [(annotation? x)
+          (if a?
+              (wrf-graph x p t a? wrf-annotation)
+              (wrf (annotation-stripped x) p t a?))]
+         ; this check must go before $record? check
          [(eq-hashtable? x) (wrf-graph x p t a? wrf-eqht)]
+         ; this check must go before $record? check
          [(symbol-hashtable? x) (wrf-graph x p t a? wrf-symht)]
+         ; this check must go before $record? check
          [(hashtable? x) ($oops 'fasl-write "invalid fasl object ~s" x)]
          [($record? x) (wrf-graph x p t a? wrf-record)]
          [(vector? x) (wrf-graph x p t a? wrf-vector)]
@@ -567,7 +589,18 @@
          [else ($oops 'fasl-write "invalid fasl object ~s" x)])))
 
 (define start
-  (lambda (p t proc)
+  (lambda (p t situation proc)
+    (define (append-bvs bv*)
+      (let f ([bv* bv*] [n 0])
+        (if (null? bv*)
+            (if (fixnum? n)
+                (make-bytevector n)
+                ($oops 'fasl-write "fasl output is too large to compress"))
+            (let ([bv1 (car bv*)])
+              (let ([m (bytevector-length bv1)])
+                (let ([bv2 (f (cdr bv*) (+ n m))])
+                  (bytevector-copy! bv1 0 bv2 n m)
+                  bv2))))))
     (dump-graph)
     (let-values ([(bv* size)
                   (let-values ([(p extractor) ($open-bytevector-list-output-port)])
@@ -577,24 +610,40 @@
                         (put-uptr p n)))
                     (proc p)
                     (extractor))])
-      (put-u8 p (constant fasl-type-fasl-size))
-      (put-uptr p size)
-      (for-each (lambda (bv) (put-bytevector p bv)) bv*))))
+      (put-u8 p situation)
+      (if (and (>= size 100) (fasl-compressed))
+          (let* ([fmt ($tc-field 'compress-format ($tc))]
+                 [bv (append-bvs bv*)]
+                 [uncompressed-size-bv (call-with-bytevector-output-port (lambda (bvp) (put-uptr bvp (bytevector-length bv))))]
+                 [bv ($bytevector-compress bv fmt)])
+            (put-uptr p (+ 1 (bytevector-length uncompressed-size-bv) (bytevector-length bv)))
+            (put-u8 p 
+              (cond
+                [(eqv? fmt (constant COMPRESS-GZIP)) (constant fasl-type-gzip)]
+                [(eqv? fmt (constant COMPRESS-LZ4)) (constant fasl-type-lz4)]
+                [else ($oops 'fasl-write "unexpected $compress-format value ~s" fmt)]))
+            (put-bytevector p uncompressed-size-bv)
+            (put-bytevector p bv))
+          (begin
+            (put-uptr p (+ size 1))
+            (put-u8 p (constant fasl-type-uncompressed))
+            (for-each (lambda (bv) (put-bytevector p bv)) bv*))))))
 
 (module (fasl-write fasl-file)
-  ; when called from fasl-write or fasl-file, pass #t for a? to preserve annotations;
+  ; when called from fasl-write or fasl-file, always preserve annotations;
   ; otherwise use value passed in by the compiler
   (define fasl-one
     (lambda (x p)
       (let ([t (make-table)])
-         (bld x t #t)
-         (start p t (lambda (p) (wrf x p t #t))))))
+        (bld x t (constant annotation-all))
+        (start p t (constant fasl-type-visit-revisit) (lambda (p) (wrf x p t (constant annotation-all)))))))
 
   (define-who fasl-write
     (lambda (x p)
       (unless (and (output-port? p) (binary-port? p))
         ($oops who "~s is not a binary output port" p))
-      (emit-header p (constant machine-type-any))
+      (when ($port-flags-set? p (constant port-flag-compressed)) ($compressed-warning who p))
+      (emit-header p (constant scheme-version) (constant machine-type-any))
       (fasl-one x p)))
 
   (define-who fasl-file
@@ -610,7 +659,7 @@
             (delete-file out #f))
           (on-reset
             (close-port op)
-            (emit-header op (constant machine-type-any))
+            (emit-header op (constant scheme-version) (constant machine-type-any))
             (let fasl-loop ()
               (let ([x (read ip)])
                 (unless (eof-object? x)
@@ -621,10 +670,10 @@
 
 (define fasl-base-rtd
   (lambda (x p)
-    (emit-header p (constant machine-type-any))
+    (emit-header p (constant scheme-version) (constant machine-type-any))
     (let ([t (make-table)])
       (bld-graph x t #f really-bld-record)
-      (start p t (lambda (p) (wrf-graph x p t #f really-wrf-record))))))
+      (start p t (constant fasl-type-visit-revisit) (lambda (p) (wrf-graph x p t #f really-wrf-record))))))
 
 ($fasl-target (make-target bld-graph bld wrf start make-table wrf-graph fasl-base-rtd fasl-write fasl-file))
 )
@@ -638,13 +687,12 @@
   (set! $fasl-bld-graph (lambda (x t a? handler) ((target-fasl-bld-graph (fasl-target)) x t a? handler)))
   (set! $fasl-enter (lambda (x t a?) ((target-fasl-enter (fasl-target)) x t a?)))
   (set! $fasl-out (lambda (x p t a?) ((target-fasl-out (fasl-target)) x p t a?)))
-  (set! $fasl-start (lambda (p t proc) ((target-fasl-start (fasl-target)) p t proc)))
+  (set! $fasl-start (lambda (p t situation proc) ((target-fasl-start (fasl-target)) p t situation proc)))
   (set! $fasl-table (lambda () ((target-fasl-table (fasl-target)))))
   (set! $fasl-wrf-graph (lambda (x p t a? handler) ((target-fasl-wrf-graph (fasl-target)) x p t a? handler)))
   (set! $fasl-base-rtd (lambda (x p) ((target-fasl-base-rtd (fasl-target)) x p)))
   (set! fasl-write (lambda (x p) ((target-fasl-write (fasl-target)) x p)))
   (set! fasl-file (lambda (in out) ((target-fasl-file (fasl-target)) in out))))
-)
 
 (when ($unbound-object? (#%$top-level-value '$capture-fasl-target))
   (let ([ht (make-hashtable values =)])
@@ -661,3 +709,4 @@
           [else ($oops who "unrecognized machine type ~s" mt)])))))
   
 ($capture-fasl-target (constant machine-type))
+)

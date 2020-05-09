@@ -1,4 +1,3 @@
-"prims.ss"
 ;;; prims.ss
 ;;; Copyright 1984-2017 Cisco Systems, Inc.
 ;;; 
@@ -19,6 +18,7 @@
    (run-cp0 (default-run-cp0))
    (generate-interrupt-trap #f))
 
+(begin
 ;;; hand-coded primitives
 
 (define-who $hand-coded
@@ -87,6 +87,11 @@
   (foreign-procedure "(cs)s_oblist"
     ()
     scheme-object))
+
+(define $dequeue-scheme-signals
+  (foreign-procedure "(cs)dequeue_scheme_signals"
+    (ptr)
+    ptr))
 
 (define-who $show-allocation
   (let ([fp (foreign-procedure "(cs)s_showalloc" (boolean string) void)])
@@ -1070,6 +1075,10 @@
    (lambda (v i x)
       (#2%vector-set! v i x)))
 
+(define vector-cas!
+   (lambda (v i old-x new-x)
+      (#2%vector-cas! v i old-x new-x)))
+
 (define vector-set-fixnum!
   (lambda (v i x)
     (#2%vector-set-fixnum! v i x)))
@@ -1147,6 +1156,12 @@
       (if (mutable-box? b)
           (set-box! b v)
           ($oops 'set-box! "~s is not a mutable box" b))))
+
+(define-who box-cas!
+   (lambda (b old-v new-v)
+      (if (mutable-box? b)
+          (box-cas! b old-v new-v)
+          ($oops who "~s is not a mutable box" b))))
 
 (define mutable-box?
   (lambda (b)
@@ -1399,10 +1414,43 @@
 
 (define-who $install-guardian
   (lambda (obj rep tconc)
-    (unless (and (pair? tconc) (pair? (car tconc)) (pair? (cdr tconc))) ($oops who "~s is not a tconc" tconc))
+    ; tconc is assumed to be valid at all call sites
     (#3%$install-guardian obj rep tconc)))
 
+(define-who $install-ftype-guardian
+  (lambda (obj tconc)
+    ; tconc is assumed to be valid at all call sites
+    (#3%$install-ftype-guardian obj tconc)))
+
+(define guardian?
+  (lambda (g)
+    (#3%guardian? g)))
+
+(define-who unregister-guardian
+  (let ([fp (foreign-procedure "(cs)unregister_guardian" (scheme-object) scheme-object)])
+    (define probable-tconc? ; full tconc? could be expensive ...
+      (lambda (x)
+        (and (pair? x) (pair? (car x)) (pair? (cdr x)))))
+    (lambda (g)
+      (unless (guardian? g) ($oops who "~s is not a guardian" g))
+      ; at present, guardians should have either one free variable (the tcond) or two(the tconc and an ftd)
+      ; but we just look for a probable tconc among whatever free variables it has
+      (fp (let ([n ($code-free-count ($closure-code g))])
+            (let loop ([i 0])
+              (if (fx= i n)
+                  ($oops #f "failed to find a tconc among the free variables of guardian ~s" g)
+                  (let ([x ($closure-ref g i)])
+                    (if (probable-tconc? x)
+                        x
+                        (loop (fx+ i 1)))))))))))
+
+(define-who $ftype-guardian-oops
+  (lambda (ftd obj)
+    ($oops 'ftype-guardian "~s is not an ftype pointer of the expected type ~s" obj ftd)))
+
 (define make-guardian (lambda () (#2%make-guardian)))
+
+(define $make-ftype-guardian (lambda (ftd) (#2%$make-ftype-guardian ftd)))
 
 (define $address-in-heap?
   (foreign-procedure "(cs)s_addr_in_heap" (uptr) boolean))
@@ -1463,10 +1511,12 @@
 (define fork-thread)
 (define make-mutex)
 (define mutex?)
+(define mutex-name)
 (define mutex-acquire)
 (define mutex-release)
 (define make-condition)
 (define thread-condition?)
+(define condition-name)
 (define condition-wait)
 (define condition-signal)
 (define condition-broadcast)
@@ -1491,14 +1541,28 @@
 (define cs (foreign-procedure "(cs)condition_signal" (scheme-object) void))
 
 (define-record-type (condition $make-condition $condition?)
-  (fields (mutable addr $condition-addr $condition-addr-set!))
+  (fields (mutable addr $condition-addr $condition-addr-set!)
+          (immutable name $condition-name))
   (nongenerative)
   (sealed #t))
 
 (define-record-type (mutex $make-mutex $mutex?)
-  (fields (mutable addr $mutex-addr $mutex-addr-set!))
+  (fields (mutable addr $mutex-addr $mutex-addr-set!)
+          (immutable name $mutex-name))
   (nongenerative)
   (sealed #t))
+
+(define make-mutex-no-check
+  (lambda (name)
+    (let ([m ($make-mutex (mm) name)])
+      (mutex-guardian m)
+      m)))
+
+(define make-condition-no-check
+  (lambda (name)
+    (let ([c ($make-condition (mc) name)])
+      (condition-guardian c)
+      c)))
 
 (define mutex-guardian (make-guardian))
 (define condition-guardian (make-guardian))
@@ -1518,15 +1582,21 @@
                 (t)
                 (void))))))))
 
-(set! make-mutex
-  (lambda ()
-    (let ([m ($make-mutex (mm))])
-      (mutex-guardian m)
-      m)))
+(set-who! make-mutex
+  (case-lambda
+    [() (make-mutex-no-check #f)]
+    [(name)
+     (unless (or (not name) (symbol? name)) ($oops who "~s is not a symbol or #f" name))
+     (make-mutex-no-check name)]))
 
 (set! mutex?
   (lambda (x)
     ($mutex? x)))
+
+(set-who! mutex-name
+  (lambda (m)
+    (unless (mutex? m) ($oops who "~s is not a mutex" m))
+    ($mutex-name m)))
 
 (set! mutex-acquire
   (case-lambda
@@ -1550,15 +1620,21 @@
         ($oops 'mutex-release "mutex is defunct"))
       (mr addr))))
 
-(set! make-condition
-  (lambda ()
-    (let ([c ($make-condition (mc))])
-      (condition-guardian c)
-      c)))
+(set-who! make-condition
+  (case-lambda
+    [() (make-condition-no-check #f)]
+    [(name)
+     (unless (or (not name) (symbol? name)) ($oops who "~s is not a symbol or #f" name))
+     (make-condition-no-check name)]))
 
 (set! thread-condition?
   (lambda (x)
     ($condition? x)))
+
+(set-who! condition-name
+  (lambda (c)
+    (unless (thread-condition? c) ($oops who "~s is not a condition" c))
+    ($condition-name c)))
 
 (set! condition-wait
   (case-lambda
@@ -1619,8 +1695,8 @@
               ($condition-addr-set! c 0)))
           (f))))))
 
-(set! $tc-mutex ($make-mutex ($raw-tc-mutex)))
-(set! $collect-cond ($make-condition ($raw-collect-cond)))
+(set! $tc-mutex ($make-mutex ($raw-tc-mutex) '$tc-mutex))
+(set! $collect-cond ($make-condition ($raw-collect-cond) '$collect-cond))
 ))
 
 (let ()
@@ -1644,9 +1720,11 @@
   (define-tc-parameter $sfd (lambda (x) (or (eq? x #f) (source-file-descriptor? x))) "a source-file descriptor or #f" #f)
   (define-tc-parameter $current-mso (lambda (x) (or (eq? x #f) (procedure? x))) "a procedure or #f" #f)
   (define-tc-parameter $target-machine symbol? "a symbol")
-  (define-tc-parameter optimize-level (lambda (x) (and (fixnum? x) (fx<= 0 x 3))) "valid optimize level" 0)
-  (define-tc-parameter $compile-profile (lambda (x) (memq x '(#f source block))) "valid compile-profile flag" #f)
-  (define-tc-parameter subset-mode (lambda (mode) (memq mode '(#f system))) "valid subset mode" #f)
+  (define-tc-parameter optimize-level (lambda (x) (and (fixnum? x) (fx<= 0 x 3))) "a valid optimize level" 0)
+  (define-tc-parameter $compile-profile (lambda (x) (memq x '(#f source block))) "a valid compile-profile flag" #f)
+  (define-tc-parameter subset-mode (lambda (mode) (memq mode '(#f system))) "a valid subset mode" #f)
+  (define-tc-parameter default-record-equal-procedure (lambda (x) (or (eq? x #f) (procedure? x))) "a procedure or #f" #f)
+  (define-tc-parameter default-record-hash-procedure (lambda (x) (or (eq? x #f) (procedure? x))) "a procedure or #f" #f)
 )
 
 (define-who compile-profile
@@ -1672,6 +1750,7 @@
                  [(x) (name (and x #t))]))
              (name init))])))
   (define-boolean-tc-parameter generate-inspector-information #t)
+  (define-boolean-tc-parameter generate-procedure-source-information #f)
   (define-boolean-tc-parameter generate-profile-forms #t)
   (define-boolean-tc-parameter $suppress-primitive-inlining #f)
 )
@@ -1753,16 +1832,16 @@
 (when-feature windows
 (define get-registry
   (let ([fp (foreign-procedure "(windows)GetRegistry"
-              (string)
+              (wstring)
               scheme-object)])
     (lambda (s)
       (unless (string? s) ($oops 'get-registry "~s is not a string" s))
       (let ([x (fp s)])
-        (and x (utf8->string x))))))
+        (and x (utf16->string x (constant native-endianness)))))))
 
 (define put-registry!
   (let ([fp (foreign-procedure "(windows)PutRegistry"
-              (string string)
+              (wstring wstring)
               void)])
     (lambda (s1 s2)
       (unless (string? s1) ($oops 'put-registry! "~s is not a string" s1))
@@ -1771,7 +1850,7 @@
 
 (define remove-registry!
   (let ([fp (foreign-procedure "(windows)RemoveRegistry"
-              (string)
+              (wstring)
               void)])
     (lambda (s)
       (unless (string? s) ($oops 'remove-registry! "~s is not a string" s))
@@ -1835,14 +1914,14 @@
                       [(fx<= b1 #x7f) ; one-byte encoding
                        (string-set! s j (integer->char b1))
                        (loop (fx+ i 1) (fx+ j 1))]
-                      [(fx<= #xc2 b1 #xdf) ; two-byte encoding
+                      [(fx<= #xc0 b1 #xdf) ; two-byte encoding
                        (if (fx< i (fx- n 1)) ; have at least two bytes?
                            (let ([b2 (bytevector-u8-ref bv (fx+ i 1))])
                              (if (fx= (fxsrl b2 6) #b10) ; second byte a continuation byte?
                                  (begin
                                    (string-set! s j
                                      (let ([x (fxlogor (fxsll (fxlogand b1 #b11111) 6) (fxlogand b2 #b111111))])
-                                       (if (fx<= x #x7f) #\x8ffd (integer->char x))))
+                                       (if (fx<= x #x7f) #\xfffd (integer->char x))))
                                    (loop (fx+ i 2) (fx+ j 1)))
                                 ; second byte is not a continuation byte
                                  (begin
@@ -2235,4 +2314,5 @@
       (let ([cp (cp->unsigned who cp)])
         (unless (string? str) ($oops who "~s is not a string" str))
         (wctmb cp (string->utf16 str 'little))))))
+)
 )

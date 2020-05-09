@@ -727,6 +727,11 @@
            (eqv? (read-char x) #\a)
            (char-ready? x)
            (eof-object? (read-char x))))
+   (parameterize ([current-input-port (open-input-string "a")])
+      (and (char-ready?)
+           (eqv? (read-char) #\a)
+           (char-ready?)
+           (eof-object? (read-char))))
  )
 
 (mat clear-input-port ; test interactively
@@ -882,6 +887,26 @@
  )
 
 (mat fasl
+  (error?
+    (separate-eval '(let ([op (open-file-output-port "testfile.ss" (file-options compressed replace))])
+                      (fasl-write 3 op))))
+  (error?
+    (separate-eval '(let ([ip (open-file-input-port "testfile.ss" (file-options compressed))])
+                      (fasl-read ip))))
+  (equal?
+    (separate-eval '(with-exception-handler
+                      (lambda (c) (unless (warning? c) (raise-continuable c)))
+                      (lambda ()
+                        (let ([op (open-file-output-port "testfile.ss" (file-options compressed replace))])
+                          (fasl-write 3 op)))))
+    "")
+  (equal?
+    (separate-eval `(with-exception-handler
+                      (lambda (c) (unless (warning? c) (raise-continuable c)))
+                      (lambda ()
+                        (let ([ip (open-file-input-port "testfile.ss" (file-options compressed))])
+                          (fasl-read ip)))))
+    "3\n")
   (pretty-equal?
     (begin
       (call-with-port
@@ -921,10 +946,10 @@
           (open-file-input-port "testfile.ss")
           (get-stuff fasl-read))
         (call-with-port
-          (open-file-input-port "testfile.ss" (file-options compressed))
+          (open-file-input-port "testfile.ss" (file-options #;compressed))
           (get-stuff fasl-read))
         (call-with-port
-          (open-file-input-port "testfile.ss" (file-options compressed))
+          (open-file-input-port "testfile.ss" (file-options #;compressed))
           (get-stuff (lambda (p)
                        (when (eof-object? (lookahead-u8 p)) (printf "done\n"))
                        (fasl-read p))))
@@ -1614,25 +1639,24 @@
     #t)
   (error?
     (let* ([ip (open-file-input-port "testfile.ss")]
-           [sfd (#%$source-file-descriptor "testfile.ss" ip)]
+           [sfd (make-source-file-descriptor "testfile.ss" ip #t)]
            [ip (transcoded-port ip (native-transcoder))])
       (dynamic-wind
         void
-        (lambda () (read-token ip sfd))
+        (lambda () (read-token ip sfd 0))
         (lambda () (close-input-port ip)))))
   (let ()
     (with-output-to-file "testfile.ss"
       (lambda () (display "\neat\n"))
       'replace)
     #t)
-  ; $transcoded-source-port is no more
-  #;(equal?
+  (equal?
     (let-values ([vals (let* ([ip (open-file-input-port "testfile.ss")]
-                              [sfd (#%$source-file-descriptor "testfile.ss" ip)]
-                              [ip (#%$transcoded-source-port ip (native-transcoder))])
+                              [sfd (make-source-file-descriptor "testfile.ss" ip #t)]
+                              [ip (transcoded-port ip (native-transcoder))])
                          (dynamic-wind
                            void
-                           (lambda () (read-token ip sfd))
+                           (lambda () (read-token ip sfd 0))
                            (lambda () (close-input-port ip))))])
       vals)
     '(atomic eat 1 4))
@@ -1673,7 +1697,7 @@
 (begin (define-record $acyclic ((immutable notme))) (record-reader '$acyclic (type-descriptor $acyclic)))
 
 (xmat
-  "; Test error \"fasl object created by different release\"\n; This one is the list (a b c d) created by version 5.9b\n\n#@   5.9b       a   b   c   d\f&   \n"
+  "; Test error \"fasl object created by different release\"\n; This one is the list (a b c d) created by version 5.9b\n\n#@\x2;\x4;\x0;\x0;\x0;5.9b\x0;\x4;\x0;\x0;\x0;\x2;\x1;\x0;\x0;\x0;a\x2;\x1;\x0;\x0;\x0;b\x2;\x1;\x0;\x0;\x0;c\x2;\x1;\x0;\x0;\x0;d\f&\x0;\x0;\x0;\n"
   )
 
 (xmat
@@ -2858,7 +2882,7 @@
   (or (not (windows?))
       (> (length (directory-list "\\\\?\\c:\\")) 0))
   (or (not (windows?))
-      (> (length (directory-list "\\\\?\\c:")) 0))
+      (> (length (directory-list "\\\\?\\C:\\")) 0))
   (file-directory? "/")
   (file-directory? "/.")
   (file-exists? ".")
@@ -2869,7 +2893,7 @@
            (file-directory? "c:/."))
       (not (file-directory? "c:")))
   (if (windows?)
-      (and (file-directory? "\\\\?\\c:")
+      (and (not (file-directory? "\\\\?\\c:"))
            (file-directory? "\\\\?\\c:\\"))
       (not (file-directory? "\\\\?\\c:")))
   (if (windows?)
@@ -2878,7 +2902,7 @@
            (file-exists? "c:/."))
       (not (file-exists? "c:")))
   (if (windows?)
-      (and (file-exists? "\\\\?\\c:")
+      (and (not (file-exists? "\\\\?\\c:"))
            (file-exists? "\\\\?\\c:\\"))
       (not (file-exists? "\\\\?\\c:")))
   (if (windows?)
@@ -2899,9 +2923,9 @@
         (and (logtest m #o400)
              (not (logtest m #o111)))))
   (or (not (windows?))
-      (and (fixnum? (get-mode "c:"))
-           (eqv? (get-mode "c:") (get-mode "c:/"))
-           (eqv? (get-mode "c:") (get-mode "c:/."))))
+      (and (fixnum? (get-mode "c:/"))
+           (eqv? (get-mode "c:/") (get-mode "C:\\"))
+           (eqv? (get-mode "c:/") (get-mode "c:\\."))))
   (if (or (windows?) (embedded?))
       (fixnum? (get-mode "../mats"))
       (eqv? (logand (get-mode "../mats") #o700) #o700))
@@ -2930,9 +2954,9 @@
            (time? (file-change-time "c:/"))
            (time? (file-modification-time "c:/"))))
   (or (not (windows?))
-      (and (time? (file-access-time "\\\\?\\c:"))
-           (time? (file-change-time "\\\\?\\c:"))
-           (time? (file-modification-time "\\\\?\\c:"))))
+      (and (time? (file-access-time "\\\\?\\C:\\"))
+           (time? (file-change-time "\\\\?\\C:\\"))
+           (time? (file-modification-time "\\\\?\\C:\\"))))
   (or (not (windows?))
       (and (time? (file-access-time "\\\\?\\c:\\"))
            (time? (file-change-time "\\\\?\\c:\\"))
@@ -3120,9 +3144,7 @@
   (eq? (path-absolute? "/abc") #t)
   (eq? (path-absolute? "foo") #f)
   (eq? (path-absolute? "foo/bar/a.b") #f)
-  (eq?
-    (path-absolute? "c:abc")
-    (and (windows?) #t))
+  (eq? (path-absolute? "c:abc") #f)
 
   (equal? (path-parent "") "")
   (equal? (path-parent "a") "")
@@ -3275,17 +3297,17 @@
    ; windows
     (if (windows?)
         (table
-          ("c:" "t" "c:" "" "c:" "" "c:" "")
+          ("c:" "f" "c:" "" "c:" "" "c:" "")
           ("c:/" "t" "c:/" "" "c:/" "" "c:/" "")
-          ("c:.." "t" "c:" ".." "c:" ".." "c:.." "")
-          ("c:../" "t" "c:" "../" "c:.." "" "c:../" "")
-          ("c:../a" "t" "c:" "../a" "c:.." "a" "c:../a" "")
-          ("c:." "t" "c:" "." "c:" "." "c:." "")
-          ("c:./" "t" "c:" "./" "c:." "" "c:./" "")
-          ("c:./a" "t" "c:" "./a" "c:." "a" "c:./a" "")
+          ("c:.." "f" "c:" ".." "c:" ".." "c:.." "")
+          ("c:../" "f" "c:" "../" "c:.." "" "c:../" "")
+          ("c:../a" "f" "c:" "../a" "c:.." "a" "c:../a" "")
+          ("c:." "f" "c:" "." "c:" "." "c:." "")
+          ("c:./" "f" "c:" "./" "c:." "" "c:./" "")
+          ("c:./a" "f" "c:" "./a" "c:." "a" "c:./a" "")
           ("c:/abc" "t" "c:/" "abc" "c:/" "abc" "c:/abc" "")
-          ("c:abc" "t" "c:" "abc" "c:" "abc" "c:abc" "")
-          ("c:abc/def" "t" "c:" "abc/def" "c:abc" "def" "c:abc/def" "")
+          ("c:abc" "f" "c:" "abc" "c:" "abc" "c:abc" "")
+          ("c:abc/def" "f" "c:" "abc/def" "c:abc" "def" "c:abc/def" "")
           ("c:/abc/def" "t" "c:/" "abc/def" "c:/abc" "def" "c:/abc/def" "")
           ("//abc" "t" "//abc" "" "//abc" "" "//abc" "")
           ("//abc/" "t" "//abc" "" "//abc" "" "//abc/" "")

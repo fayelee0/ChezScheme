@@ -47,7 +47,7 @@
      (set! aaaaa 0)
      (load "testfile.so")
      (eqv? aaaaa 7))
-   (parameterize ([compile-compressed #f])
+   (parameterize ([fasl-compressed #f])
      (printf "***** expect \"compile-file\" message:~%")
      (compile-file "testfile")
      (set! aaaaa 0)
@@ -62,7 +62,7 @@
      (load "testfile.so")
      (eqv? aaaaa -7))
    (let ((ip (open-input-string "(let ((x -3) (y -4)) (set! aaaaa (+ x y)))"))
-         (op (open-file-output-port "testfile.so" (file-options replace compressed))))
+         (op (open-file-output-port "testfile.so" (file-options replace #;compressed))))
      (compile-port ip op)
      (close-input-port ip)
      (close-port op)
@@ -98,7 +98,7 @@
       'replace)
     #t)
   (equal?
-    (call-with-port (open-file-output-port "testfile.so" (file-options replace compressed))
+    (call-with-port (open-file-output-port "testfile.so" (file-options replace #;compressed))
       (lambda (op)
         (parameterize ([compile-imported-libraries #t])
           (compile-to-port
@@ -111,6 +111,34 @@
     (with-output-to-string (lambda () (load "testfile.so")))
     "6\n")
  )
+
+(mat load-compiled-from-port
+  (begin
+    (define-values (o get) (open-bytevector-output-port))
+    (compile-to-port '((define lcfp1 'worked) 'loaded) o)
+    (eq? 'loaded (load-compiled-from-port (open-bytevector-input-port (get)))))
+  (begin
+    (define lcfp-bv
+      (let-values ([(o get) (open-bytevector-output-port)])
+        (compile-to-port
+          '((printf "revisit\n")
+            (define-syntax $lcfp-a (begin (printf "visit\n") (lambda (x) 0)))
+            (eval-when (visit revisit) (printf "visit-revisit\n"))
+            (eval-when (visit) 'visit-return)
+            'revisit-return)
+          o)
+        (get)))
+    #t)
+  (equal?
+    (with-output-to-string (lambda () (printf "result = ~s\n" (load-compiled-from-port (open-bytevector-input-port lcfp-bv)))))
+    "revisit\nvisit\nvisit-revisit\nresult = revisit-return\n")
+  (equal?
+    (with-output-to-string (lambda () (printf "result = ~s\n" (visit-compiled-from-port (open-bytevector-input-port lcfp-bv)))))
+    "visit\nvisit-revisit\nresult = visit-return\n")
+  (equal?
+    (with-output-to-string (lambda () (printf "result = ~s\n" (revisit-compiled-from-port (open-bytevector-input-port lcfp-bv)))))
+    "revisit\nvisit-revisit\nresult = revisit-return\n")
+)
 
 (mat compile-to-file
   (begin
@@ -278,19 +306,6 @@
 )
 
 (mat maybe-compile
-  (begin
-    (define touch
-      (lambda (objfn srcfn)
-        (let loop ()
-          (let ([p (open-file-input/output-port srcfn (file-options no-fail no-truncate))])
-            (put-u8 p (lookahead-u8 p))
-            (close-port p))
-          (when (file-exists? objfn)
-            (unless (time>? (file-modification-time srcfn) (file-modification-time objfn))
-              (sleep (make-time 'time-duration 1000000 1))
-              (loop))))
-        #t))
-    #t)
   (error? ; not a procedure
     (compile-program-handler 'ignore))
   (procedure? (compile-program-handler))
@@ -775,25 +790,15 @@
       "testdir/testfile-mc-1b")
     #t)
   (error? ; can't find testfile-mc-1a.ss
-    (let ([mt* (map file-modification-time '("testdir/testfile-mc-1b.so"))])
-      (separate-compile 'maybe-compile-library "testdir/testfile-mc-1b")
-      (map
-        (lambda (x y) (if (time=? x y) '= (if (time<? x y) '< '>)))
-        (map file-modification-time '("testdir/testfile-mc-1b.so"))
-        mt*)))
-  ; make sure maybe-compile-file doesn't wipe out b.so when it fails to find a.ss
-  (file-exists? "testdir/testfile-mc-1b.so")
-  (equal?
-    (let ([mt* (map file-modification-time '("testdir/testfile-mc-1b.so"))])
-      (separate-compile '(lambda (x)
-                           (parameterize ([source-directories (cons "testdir" (source-directories))])
-                             (maybe-compile-library x)))
-        "testdir/testfile-mc-1b")
-      (map
-        (lambda (x y) (if (time=? x y) '= (if (time<? x y) '< '>)))
-        (map file-modification-time '("testdir/testfile-mc-1b.so"))
-        mt*))
-    '(=))
+    (separate-compile 'maybe-compile-library "testdir/testfile-mc-1b"))
+  ; make sure maybe-compile-file wipes out b.so when it fails to find a.ss
+  (or (= (optimize-level) 3) (not (file-exists? "testdir/testfile-mc-1b.so")))
+  (begin
+    (separate-compile '(lambda (x)
+                         (parameterize ([source-directories (cons "testdir" (source-directories))])
+                           (maybe-compile-library x)))
+      "testdir/testfile-mc-1b")
+    #t)
   (touch "testdir/testfile-mc-1b.so" "testdir/testfile-mc-1a.ss")
   (equal?
     (let ([mt* (map file-modification-time '("testdir/testfile-mc-1b.so"))])
@@ -820,20 +825,220 @@
     '(>))
   (delete-file "testdir/testfile-mc-1a.ss")
   (error? ; maybe-compile-library: can't find testfile-mc-1a.ss
-    (let ([mt* (map file-modification-time '("testdir/testfile-mc-1b.so"))])
-      (separate-compile '(lambda (x)
-                           (parameterize ([source-directories (cons "testdir" (source-directories))])
-                             (maybe-compile-library x)))
-        "testdir/testfile-mc-1b")
-      (map
-        (lambda (x y) (if (time=? x y) '= (if (time<? x y) '< '>)))
-        (map file-modification-time '("testdir/testfile-mc-1b.so"))
-        mt*)))
-  ; make sure maybe-compile-file doesn't wipe out b.so when it fails to find a.ss
-  (file-exists? "testdir/testfile-mc-1b.so")
+    (separate-compile '(lambda (x)
+                         (parameterize ([source-directories (cons "testdir" (source-directories))])
+                           (maybe-compile-library x)))
+      "testdir/testfile-mc-1b"))
+  ; make sure maybe-compile-file wipes out b.so when it fails to find a.ss
+  (or (= (optimize-level) 3) (not (file-exists? "testdir/testfile-mc-1b.so")))
   (begin
     (rm-rf "testdir")
     #t)
+  ; make sure maybe-compile-file handles incomplete fasl files
+  (begin
+    (mkfile "testfile-mc-2a.ss"
+      '(library (testfile-mc-2a)
+         (export q)
+         (import (chezscheme))
+         (define f
+           (lambda ()
+             (printf "running f\n")
+             "x"))
+         (define-syntax q
+           (begin
+             (printf "expanding testfile-mc-2a\n")
+             (lambda (x)
+               (printf "expanding q\n")
+               #'(f))))))
+    (mkfile "testfile-mc-2.ss"
+      '(import (chezscheme) (testfile-mc-2a))
+      '(define-syntax qq
+         (begin
+           (printf "expanding testfile-mc-2\n")
+           (lambda (x)
+             (printf "expanding qq\n")
+             #'q)))
+      '(printf "qq => ~a\n" qq))
+    (delete-file "testfile-mc-2a.so")
+    (delete-file "testfile-mc-2.so")
+    (display-string (separate-compile '(lambda (x) (parameterize ([compile-file-message #f] [compile-imported-libraries #t] [fasl-compressed #f]) (maybe-compile-program x))) 'mc-2))
+    #t)
+  (begin
+    (let ([p (open-file-input/output-port "testfile-mc-2a.so" (file-options no-create no-fail no-truncate))])
+      (set-port-length! p 73)
+      (close-port p))
+    (display-string (separate-compile '(lambda (x) (parameterize ([compile-file-message #f] [compile-imported-libraries #t] [fasl-compressed #f] [import-notify #t]) (maybe-compile-program x))) 'mc-2))
+    #t)
+  (begin
+    (let ([p (open-file-input/output-port "testfile-mc-2.so" (file-options no-create no-fail no-truncate))])
+      (set-port-length! p 87)
+      (close-port p))
+    (display-string (separate-compile '(lambda (x) (parameterize ([compile-file-message #f] [compile-imported-libraries #t] [fasl-compressed #f] [import-notify #t]) (maybe-compile-program x))) 'mc-2))
+    #t)
+  ; make sure maybe-compile-file handles missing include files gracefully
+  (begin
+    (mkfile "testfile-mc-3a.ss"
+      "hello from 3a!")
+    (mkfile "testfile-mc-3b.ss"
+      '(library (testfile-mc-3b)
+         (export q)
+         (import (chezscheme))
+         (define-syntax q
+           (begin
+             (printf "expanding testfile-mc-3b\n")
+             (lambda (x)
+               (printf "expanding q\n")
+               (include "./testfile-mc-3a.ss"))))))
+    (mkfile "testfile-mc-3.ss"
+      '(import (chezscheme) (testfile-mc-3b))
+      '(define-syntax qq
+         (begin
+           (printf "expanding testfile-mc-3\n")
+           (lambda (x)
+             (printf "expanding qq\n")
+             #'q)))
+      '(printf "qq => ~a\n" qq))
+    (delete-file "testfile-mc-3b.so")
+    (delete-file "testfile-mc-3.so")
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-file-message #f] [compile-imported-libraries #t])
+           (maybe-compile-program x)))
+      'mc-3)
+    #t)
+  (begin
+    (delete-file "testfile-mc-3a.ss")
+    #t)
+  (error? ; separate-compile: no such file or directory: testfile-mc-3a.ss
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-file-message #f] [compile-imported-libraries #t])
+           (maybe-compile-program x)))
+      'mc-3))
+  ; make sure maybe-compile-file handles missing include files gracefully
+  (begin
+    (define-record-type hash-bang-chezscheme)
+    (record-writer (type-descriptor hash-bang-chezscheme) (lambda (x p wr) (display-string "#!chezscheme")))
+    (mkfile "testfile-mc-4a.ss"
+      "hello from 4a!")
+    (mkfile "testfile-mc-4b.ss"
+      (make-hash-bang-chezscheme)
+      '(library (testfile-mc-4b)
+         (export b)
+         (import (chezscheme))
+         (define-syntax q
+           (lambda (x)
+             (if (file-exists? "testfile-mc-4a.ss")
+                 (begin
+                   (printf "HEY!\n")
+                   (#%$require-include "./testfile-mc-4a.ss")
+                   (call-with-input-file "testfile-mc-4a.ss" read))
+                 (begin
+                   (printf "BARLEY!\n")
+                   "testfile-mc-4a is no more"))))
+         (define (b) q)))
+    (mkfile "testfile-mc-4.ss"
+      '(import (chezscheme) (testfile-mc-4b))
+      '(printf "q => ~a\n" (b)))
+    (delete-file "testfile-mc-4b.so")
+    (delete-file "testfile-mc-4.so")
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-file-message #f] [compile-imported-libraries #t])
+           (maybe-compile-program x)))
+      'mc-4)
+    #t)
+  (equal?
+    (separate-eval '(load-program "testfile-mc-4.so"))
+    "q => hello from 4a!\n")
+  (begin
+    (mkfile "testfile-mc-4a.ss"
+      "goodbye from 4a!")
+    (touch "testfile-mc-4.so" "testfile-mc-4a.ss")
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-file-message #f] [compile-imported-libraries #t] [import-notify #t])
+           (maybe-compile-program x)))
+      'mc-4)
+    #t)
+  (equal?
+    (separate-eval '(load-program "testfile-mc-4.so"))
+    "q => goodbye from 4a!\n")
+  (begin
+    (delete-file "testfile-mc-4a.ss")
+    #t)
+  (begin
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-file-message #f] [compile-imported-libraries #t] [import-notify #t])
+           (maybe-compile-program x)))
+      'mc-4)
+    #t)
+  (equal?
+    (separate-eval '(load-program "testfile-mc-4.so"))
+    "q => testfile-mc-4a is no more\n")
+  ; make sure maybe-compile-file handles missing include files gracefully
+  (begin
+    (define-record-type hash-bang-chezscheme)
+    (record-writer (type-descriptor hash-bang-chezscheme) (lambda (x p wr) (display-string "#!chezscheme")))
+    (mkfile "testfile-mc-5a.ss"
+      "hello from 5a!")
+    (mkfile "testfile-mc-5b.ss"
+      (make-hash-bang-chezscheme)
+      '(library (testfile-mc-5b)
+         (export q)
+         (import (chezscheme))
+         (define-syntax q
+           (lambda (x)
+             (if (file-exists? "testfile-mc-5a.ss")
+                 (begin
+                   (printf "HEY!\n")
+                   (#%$require-include "./testfile-mc-5a.ss")
+                   (call-with-input-file "testfile-mc-5a.ss" read))
+                 (begin
+                   (printf "BARLEY!\n")
+                   "testfile-mc-5a is no more"))))))
+    (mkfile "testfile-mc-5.ss"
+      '(import (chezscheme) (testfile-mc-5b))
+      '(define-syntax qq (lambda (x) #'q))
+      '(printf "qq => ~a\n" qq))
+    (delete-file "testfile-mc-5b.so")
+    (delete-file "testfile-mc-5.so")
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-file-message #f] [compile-imported-libraries #t])
+           (maybe-compile-program x)))
+      'mc-5)
+    #t)
+  (equal?
+    (separate-eval '(load-program "testfile-mc-5.so"))
+    "qq => hello from 5a!\n")
+  (begin
+    (mkfile "testfile-mc-5a.ss"
+      "goodbye from 5a!")
+    (touch "testfile-mc-5.so" "testfile-mc-5a.ss")
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-file-message #f] [compile-imported-libraries #t] [import-notify #t])
+           (maybe-compile-program x)))
+      'mc-5)
+    #t)
+  (equal?
+    (separate-eval '(load-program "testfile-mc-5.so"))
+    "qq => goodbye from 5a!\n")
+  (begin
+    (delete-file "testfile-mc-5a.ss")
+    #t)
+  (begin
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-file-message #f] [compile-imported-libraries #t] [import-notify #t])
+           (maybe-compile-program x)))
+      'mc-5)
+    #t)
+  (equal?
+    (separate-eval '(load-program "testfile-mc-5.so"))
+    "qq => testfile-mc-5a is no more\n")
  )
 
 (mat make-boot-file
@@ -876,10 +1081,7 @@
           "testfile-5.ss"))
       (let-values ([(to-stdin from-stdout from-stderr pid)
                     (open-process-ports
-                      (format "~a -b testfile.boot -q"
-                        (if (windows?)
-                            (list->string (subst #\\ #\/ (string->list *scheme*)))
-                            *scheme*))
+                      (format "~a -b ./testfile.boot -q" (patch-exec-path *scheme*))
                       (buffer-mode block)
                       (native-transcoder))])
         (close-output-port to-stdin)
@@ -890,6 +1092,28 @@
           (unless (eof-object? err) (error 'bootfile-test1 err))
           out)))
     "hello 1\nhello 2\nhello 3\nhello 4\nhello 5\n")
+  (equal?
+    (begin
+      (parameterize ([optimize-level 2])
+        (compile-to-file
+         '((library (A) (export a) (import (scheme)) (define a 'aye))
+           (library (B) (export b) (import (A) (scheme)) (define b (list a 'captain))))
+         "testfile-libs.so")
+        (make-boot-file "testfile.boot" '("petite") "testfile-libs.so"))
+      (let-values ([(to-stdin from-stdout from-stderr pid)
+                    (open-process-ports
+                      (format "~a -b ./testfile.boot -q" (patch-exec-path *scheme*))
+                      (buffer-mode block)
+                      (native-transcoder))])
+        (pretty-print '(let () (import (B)) (printf "~s\n" b)) to-stdin)
+        (close-output-port to-stdin)
+        (let ([out (get-string-all from-stdout)]
+              [err (get-string-all from-stderr)])
+          (close-input-port from-stdout)
+          (close-input-port from-stderr)
+          (unless (eof-object? err) (error 'bootfile-test1 err))
+          out)))
+    "(aye captain)\n")
   (equal?
     (begin
       (unless (or (embedded?) (equal? *scheme* (format "../bin/~a/scheme~a" (machine-type) (if (windows?) ".exe" ""))))
@@ -905,10 +1129,7 @@
           "testfile-5.so"))
       (let-values ([(to-stdin from-stdout from-stderr pid)
                     (open-process-ports
-                      (format "~a -b testfile.boot -q"
-                        (if (windows?)
-                            (list->string (subst #\\ #\/ (string->list *scheme*)))
-                            *scheme*))
+                      (format "~a -b ./testfile.boot -q" (patch-exec-path *scheme*))
                       (buffer-mode block)
                       (native-transcoder))])
         (close-output-port to-stdin)
@@ -919,6 +1140,33 @@
           (unless (eof-object? err) (error 'bootfile-test2 err))
           out)))
     "hello 1\nhello 2\nhello 3\nhello 4\nhello 5\n")
+  ; regression test to verify that we can evaluate a foreign-callable form inside the procedure to
+  ; which scheme-start is set, which was failing because its relocation information was discarded
+  ; by the static-generation collection.
+  (equal?
+    (begin
+      (unless (or (embedded?) (equal? *scheme* (format "../bin/~a/scheme~a" (machine-type) (if (windows?) ".exe" ""))))
+        (errorf #f "not testing boot file based on ../boot/~a/petite.boot, since *scheme* isn't ../bin/~a/scheme~a"
+          (machine-type) (machine-type) (if (windows?) ".exe" "")))
+      (mkfile "testfile.ss"
+        '(scheme-start
+           (lambda ()
+             (let ([x 0])
+               (printf "~s\n" (foreign-callable (lambda () (set! x (+ x 1)) x) () void))))))
+      (make-boot-file "testfile.boot" '("petite") "testfile.ss")
+      (let-values ([(to-stdin from-stdout from-stderr pid)
+                    (open-process-ports
+                      (format "~a -b ./testfile.boot -q" (patch-exec-path *scheme*))
+                      (buffer-mode block)
+                      (native-transcoder))])
+        (close-output-port to-stdin)
+        (let ([out (get-string-all from-stdout)]
+              [err (get-string-all from-stderr)])
+          (close-input-port from-stdout)
+          (close-input-port from-stderr)
+          (unless (eof-object? err) (error 'bootfile-test2 err))
+          out)))
+    "#<code>\n")
 )
 
 (mat hostop
@@ -926,10 +1174,10 @@
     (separate-compile
       `(lambda (x)
          (call-with-port
-           (open-file-output-port (format "~a.so" x) (file-options compressed replace))
+           (open-file-output-port (format "~a.so" x) (file-options #;compressed replace))
            (lambda (op)
              (call-with-port
-               (open-file-output-port (format "~a.host" x) (file-options compressed replace))
+               (open-file-output-port (format "~a.host" x) (file-options #;compressed replace))
                (lambda (hostop)
                  (compile-to-port
                    '((library (testfile-hop1)
@@ -940,7 +1188,7 @@
                          (define b1 "23.5")
                          (define-syntax b2 (identifier-syntax (cons b1 b1))))
                        (define c (lambda (x) (import b) (vector b2 x)))))
-                   op #f #f ',(machine-type) hostop))))))
+                   op #f #f #f ',(machine-type) hostop))))))
       "testfile-hop1")
     (with-output-to-file "testfile-hop2.ss"
       (lambda ()
@@ -1557,6 +1805,13 @@ evaluating module init
       "testfile-wpo-prog")
     "()\n")
 
+  (equal?
+    (separate-compile
+      '(lambda (x)
+         (compile-whole-program (format "~a.wpo" x) (format "~a-none.so" x) #f))
+      "testfile-wpo-prog")
+    "()\n")
+
   (delete-file "testfile-wpo-lib.ss")
   (delete-file "testfile-wpo-lib.so")
   (delete-file "testfile-wpo-lib.wpo")
@@ -1564,6 +1819,9 @@ evaluating module init
   (equal?
     (separate-eval '(load-program "testfile-wpo-prog-all.so"))
     "3628800\n3628800\n")
+
+  (error?
+    (separate-eval '(load-program "testfile-wpo-prog-none.so")))
 
   (begin
     (with-output-to-file "testfile-wpo-a3.ss"
@@ -1741,6 +1999,11 @@ evaluating module init
     (separate-eval '(load-program "testfile-wpo-prog4-all.so"))
     "40320\n")
 
+  (eqv?
+    (separate-eval
+      '(verify-loadability 'load "testfile-wpo-prog4-all.so"))
+    "")
+
   (delete-file "testfile-wpo-c4.so")
 
   (error? ; library (testfile-wpo-c4) not found
@@ -1856,14 +2119,28 @@ evaluating module init
     (separate-eval '(load-program "testfile-wpo-prog6-all.so"))
     "invoke a\ninvoke b\n==== (3 14 17) ======== (3 19 17) ====")
 
+  (eqv?
+    (separate-eval
+      '(verify-loadability 'load "testfile-wpo-prog6-all.so"))
+    "")
+
   (begin
+    (with-output-to-file "testfile-wpo-aa7.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-aa7)
+             (export ax)
+             (import (chezscheme))
+             (define ax (gensym))
+             (printf "invoking aa\n"))))
+      'replace)
     (with-output-to-file "testfile-wpo-a7.ss"
       (lambda ()
         (pretty-print
           '(library (testfile-wpo-a7)
              (export x)
-             (import (chezscheme))
-             (define x (gensym))
+             (import (chezscheme) (testfile-wpo-aa7))
+             (define x (cons ax (gensym)))
              (printf "invoking a\n"))))
       'replace)
     (with-output-to-file "testfile-wpo-b7.ss"
@@ -1902,7 +2179,7 @@ evaluating module init
 
   (equal?
     (separate-eval '(load "testfile-wpo-ab7.so"))
-    "invoking a\ninvoking c\ninvoking b\n#t\n#t\n#t\n")
+    "invoking aa\ninvoking a\ninvoking c\ninvoking b\n#t\n#t\n#t\n")
 
   (delete-file "testfile-wpo-c7.ss")
   (delete-file "testfile-wpo-c7.wpo")
@@ -1917,7 +2194,7 @@ evaluating module init
 
   (equal?
     (separate-eval '(load "testfile-wpo-ab7-all.so"))
-    "invoking a\ninvoking c\ninvoking b\n#t\n#t\n#t\n")
+    "invoking aa\ninvoking a\ninvoking c\ninvoking b\n#t\n#t\n#t\n")
 
   (begin
     (with-output-to-file "testfile-wpo-extlib.chezscheme.sls"
@@ -1990,6 +2267,275 @@ evaluating module init
       (lambda (ip)
         (get-bytevector-n ip (string-length $hash-bang-line))))
     (string->utf8 $hash-bang-line))
+
+  (eqv?
+    (separate-eval
+      '(verify-loadability 'load "testfile-wpo-c8-all.so"))
+    "")
+
+  (begin
+    (mkfile "testfile-wpo-a9.ss"
+      '(library (testfile-wpo-a9)
+         (export x)
+         (import (chezscheme))
+         (define x (eval 'x (environment '(testfile-wpo-a9))))))
+    (mkfile "testfile-wpo-b9.ss"
+      '(import (chezscheme) (testfile-wpo-a9))
+      '(printf "x = ~s\n" x))
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([generate-wpo-files #t] [compile-imported-libraries #t])
+           (compile-program x)))
+      'wpo-b9)
+    (separate-compile
+      '(lambda (x)
+         (compile-whole-program (format "~a.wpo" x) (format "~a-all.so" x) #t))
+      'wpo-b9)
+    (separate-compile
+      '(lambda (x)
+         (compile-whole-library (format "~a.wpo" x) (format "~a-all.so" x)))
+      'wpo-a9)
+    #t)
+
+  (error? ; invoke cycle
+    (separate-eval
+      '(load-library "testfile-wpo-a9.so")
+      '(let () (import (testfile-wpo-a9)) x)))
+
+  (error? ; invoke cycle
+    (separate-eval
+      '(load-library "testfile-wpo-a9-all.so")
+      '(let () (import (testfile-wpo-a9)) x)))
+
+  (error? ; invoke cycle
+    (separate-eval
+      '(load-program "testfile-wpo-b9.so")))
+
+  (error? ; invoke cycle
+    (separate-eval
+      '(load-program "testfile-wpo-b9-all.so")))
+
+  (begin
+    (mkfile "testfile-wpo-a10.ss"
+      '(library (testfile-wpo-a10)
+         (export ax)
+         (import (chezscheme))
+         (define ax (cons 'a '()))))
+    (mkfile "testfile-wpo-b10.ss"
+      '(library (testfile-wpo-b10)
+         (export bx)
+         (import (chezscheme) (testfile-wpo-a10))
+         (define bx (cons 'b ax))))
+    (mkfile "testfile-wpo-c10.ss"
+      '(library (testfile-wpo-c10)
+         (export cx)
+         (import (chezscheme) (testfile-wpo-b10))
+         (define cx (cons 'c bx))))
+    (mkfile "testfile-wpo-d10.ss"
+      '(import (chezscheme) (testfile-wpo-c10))
+      '(printf "d: cx = ~s\n" cx))
+    (mkfile "testfile-wpo-e10.ss"
+      '(import (chezscheme) (testfile-wpo-a10))
+      '(printf "e: ax = ~s\n" ax))
+    (mkfile "testfile-wpo-f10.ss"
+      '(import (chezscheme) (testfile-wpo-c10))
+      '(printf "f: cx = ~s\n" cx))
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([generate-wpo-files #t]
+                        [compile-imported-libraries #t])
+           (compile-program x)))
+      'wpo-d10)
+    (separate-compile 'compile-program 'wpo-e10)
+    (separate-compile 'compile-program 'wpo-f10)
+    #t)
+  
+  ; cause b10 to be excluded from the whole program
+  (delete-file "testfile-wpo-b10.wpo")
+  
+  (equal?
+    (separate-eval
+      '(compile-whole-program "testfile-wpo-d10.wpo"
+         "testfile-wpo-d10-all.so" #f))
+    "((testfile-wpo-b10))\n")
+  
+  (equal?
+    (separate-eval '(verify-loadability 'visit "testfile-wpo-d10-all.so"))
+    "")
+
+  (equal?
+    (separate-eval '(verify-loadability 'revisit "testfile-wpo-d10-all.so"))
+    "")
+
+  (equal?
+    (separate-eval '(verify-loadability 'load "testfile-wpo-d10-all.so"))
+    "")
+  
+  (equal?
+    (separate-eval '(load-program "testfile-wpo-d10-all.so"))
+    "d: cx = (c b a)\n")
+  
+  ; library a10 must be visible for (excluded library)
+  ; b10's benefit, so e10 can reference its export
+  (equal?
+    (separate-eval
+      '(load-program "testfile-wpo-d10-all.so")
+      '(load-program "testfile-wpo-e10.so"))
+    "d: cx = (c b a)\ne: ax = (a)\n")
+  
+  ; library c10 need not and should not be visible, so f10
+  ; shouldn't be able to reference its export.
+  (error?
+    (separate-eval
+      '(load-program "testfile-wpo-d10-all.so")
+      '(load-program "testfile-wpo-f10.so")))
+
+  (error? ; testfile-wpo-c10 is not visible
+    (separate-eval
+      '(load-program "testfile-wpo-d10-all.so")
+      '(import (testfile-wpo-c10))))
+
+  (equal?
+    (separate-eval
+      '(load-program "testfile-wpo-d10-all.so")
+      '(verify-loadability 'visit "testfile-wpo-f10.so"))
+    "d: cx = (c b a)\n")
+
+  ; verify-loadability should error out trying to invoke
+  ; c10 because c10 is not visible
+  (error? ; not visible
+    (separate-eval
+      '(load-program "testfile-wpo-d10-all.so")
+      '(verify-loadability 'revisit "testfile-wpo-f10.so")))
+
+  (error? ; not visible
+    (separate-eval
+      '(load-program "testfile-wpo-d10-all.so")
+      '(verify-loadability 'load "testfile-wpo-f10.so")))
+
+  (begin
+    (mkfile "testfile-wpo-a11.ss"
+      '(library (testfile-wpo-a11)
+         (export ax)
+         (import (chezscheme))
+         (define ax (cons 'a '()))
+         (printf "invoking a\n")))
+    (parameterize ([generate-wpo-files #t])
+      (compile-library "testfile-wpo-a11"))
+    #t)
+
+  (equal?
+    (compile-whole-library "testfile-wpo-a11.wpo" "testfile-wpo-a11-all.so")
+    '())
+
+  (equal?
+    (separate-eval
+      '(load-library "testfile-wpo-a11.so"))
+    "")
+
+  (equal?
+    (separate-eval
+      '(load-library "testfile-wpo-a11.so")
+      '(let () (import (testfile-wpo-a11)) ax))
+    "invoking a\n(a)\n")
+
+  (equal?
+    (separate-eval
+      '(load-library "testfile-wpo-a11-all.so"))
+    "")
+
+  (equal?
+    (separate-eval
+      '(load-library "testfile-wpo-a11-all.so")
+      '(let () (import (testfile-wpo-a11)) ax))
+    "invoking a\n(a)\n")
+
+  (begin
+    (mkfile "testfile-wpo-a12.ss"
+      '(library (testfile-wpo-a12)
+         (export ax)
+         (import (chezscheme))
+         (define ax (cons 'a '()))))
+    (mkfile "testfile-wpo-b12.ss"
+      '(library (testfile-wpo-b12)
+         (export bx)
+         (import (chezscheme) (testfile-wpo-a12))
+         (define bx (eval 'cx (environment '(testfile-wpo-c12))))))
+    (mkfile "testfile-wpo-c12.ss"
+      '(library (testfile-wpo-c12)
+         (export cx)
+         (import (chezscheme) (testfile-wpo-b12))
+         (define cx (cons 'c bx))))
+    (mkfile "testfile-wpo-d12.ss"
+      '(import (chezscheme) (testfile-wpo-c12))
+      '(printf "d: cx = ~s\n" cx))
+    (parameterize ([generate-wpo-files #t]
+                   [compile-imported-libraries #t])
+      (compile-program "testfile-wpo-d12"))
+    #t)
+  
+  (error? ; cyclc
+    (separate-eval '(load-program "testfile-wpo-d12.so")))
+
+  ; cause b12 to be excluded from the whole library and program
+  (delete-file "testfile-wpo-b12.wpo")
+
+  (equal?
+    (separate-eval
+      '(compile-whole-library "testfile-wpo-c12.wpo"
+         "testfile-wpo-c12-all.so"))
+    "((testfile-wpo-b12))\n")
+  
+  (equal?
+    (separate-eval
+      '(compile-whole-program "testfile-wpo-d12.wpo"
+         "testfile-wpo-d12-all.so" #t))
+    "((testfile-wpo-b12))\n")
+  
+  (equal?
+    (separate-eval
+      '(load-library "testfile-wpo-c12-all.so"))
+    "")
+
+  (error? ; cycle
+    (separate-eval
+      '(load-library "testfile-wpo-c12-all.so")
+      '(let () (import (testfile-wpo-c12)) cx)))
+  
+  (error? ; cycle
+    (separate-eval '(load-program "testfile-wpo-d12-all.so")))
+  
+  ; verify-loadability doesn't catch (dynamic) cycles
+  (equal?
+    (separate-eval
+      '(verify-loadability 'visit "testfile-wpo-c12.so"))
+    "")
+
+  (equal?
+    (separate-eval
+      '(verify-loadability 'revisit "testfile-wpo-c12.so"))
+    "")
+
+  (equal?
+    (separate-eval
+      '(verify-loadability 'load "testfile-wpo-c12.so"))
+    "")
+  
+  ; verify-loadability doesn't catch (dynamic) cycles
+  (equal?
+    (separate-eval
+      '(verify-loadability 'visit "testfile-wpo-d12.so"))
+    "")
+
+  (equal?
+    (separate-eval
+      '(verify-loadability 'revisit "testfile-wpo-d12.so"))
+    "")
+
+  (equal?
+    (separate-eval
+      '(verify-loadability 'load "testfile-wpo-d12.so"))
+    "")
 )
 
 (mat compile-whole-library
@@ -2045,6 +2591,11 @@ evaluating module init
          (printf ">~s\n" (y))
          (printf ">~s\n" (y))))
     "invoke a\ninvoke b\n>(3 14 17)\n>(3 19 17)\n")
+
+  (eqv?
+    (separate-eval
+      '(verify-loadability 'load "testfile-cwl-b1.so"))
+    "")
 
   (error? ; library (testfile-cwl-a1) not found
     (separate-eval
@@ -2124,6 +2675,11 @@ evaluating module init
          (import (testfile-cwl-b2))
          (main)))
     "3628800\n")
+
+  (eqv?
+    (separate-eval
+      '(verify-loadability 'load "testfile-cwl-b2.so"))
+    "")
 
   (equal?
     (separate-compile
@@ -2472,14 +3028,14 @@ evaluating module init
       "testfile-cwl-b5")
     "()\n")
 
-  (error? ; attempting to re-install run-time part of library (testfile-cwl-a5)
+  (error? ; attempting to re-install compile-time (or run-time) part of library (testfile-cwl-a5)
     (separate-eval
       '(let ()
          (import (testfile-cwl-c5))
          (import (testfile-cwl-b5))
          (list (fib+fact 10) (ack+fact 3 4)))))
 
-  (error? ; attempting to re-install run-time part of library (testfile-cwl-a5)
+  (error? ; attempting to re-install compile-time (or run-time) part of library (testfile-cwl-a5)
     (separate-eval
       '(eval '(list (fib+fact 10) (ack+fact 3 4))
              (environment '(chezscheme) '(testfile-cwl-c5) '(testfile-cwl-b5)))))
@@ -2500,7 +3056,7 @@ evaluating module init
     (separate-compile 'cwl-d5)
     #t)
 
-  (error? ; attempting to re-install run-time part of library (testfile-cwl-a5) with uid #{testfile-cwl-a5 ???}
+  (error? ; attempting to re-install compile-time (or run-time) part of library (testfile-cwl-a5)
     (separate-eval '(load "testfile-cwl-d5.so")))
 
   (begin
@@ -2525,14 +3081,14 @@ evaluating module init
   (delete-file "testfile-cwl-a5.so")
   (delete-file "testfile-cwl-a5.wpo")
 
-  (error? ; attempting to re-install run-time part of library (testfile-cwl-a5) with uid #{testfile-cwl-a5 ???}
+  (error? ; attempting to re-install compile-time (or run-time) part of library (testfile-cwl-a5)
     (separate-eval
       '(let ()
          (import (testfile-cwl-c5))
          (import (testfile-cwl-b5))
          (list (fib+fact 10) (ack+fact 3 4)))))
 
-  (error? ; attempting to re-install run-time part of library (testfile-cwl-a5) with uid #{testfile-cwl-a5 ???}
+  (error? ; attempting to re-install compile-time (or run-time) part of library (testfile-cwl-a5)
     (separate-eval
       '(let ()
          (import (testfile-cwl-b5))
@@ -3121,9 +3677,1580 @@ evaluating module init
   (equal?
     (separate-eval '(let () (import (testfile-wpo-extlib-2)) (p)))
     "(9 . 5)\n")
+
+  ;; regression tests from @owaddell generated to fix problems he encountered
+  ;; with compile-whole-library from a test generator.
+  (begin
+    (with-output-to-file "testfile-wpo-coconut.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-coconut)
+             (export coconut apple->coconut)
+             (import (scheme))
+             (define $init (list '_))
+             (define apple->coconut (cons 'apple->coconut $init))
+             (define coconut (list 'coconut apple->coconut $init)))))
+      'replace)
+    (with-output-to-file "testfile-wpo-banana.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-banana)
+             (export banana apple->banana)
+             (import (scheme))
+             (define $init (list '_))
+             (define apple->banana (cons 'apple->banana $init))
+             (define banana (list 'banana apple->banana $init)))))
+      'replace)
+    (with-output-to-file "testfile-wpo-apple.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-apple)
+             (export apple)
+             (import (scheme) (testfile-wpo-banana) (testfile-wpo-coconut))
+             (define $init
+               (list
+                 '_
+                 (cons 'apple->banana apple->banana)
+                 (cons 'apple->coconut apple->coconut)))
+             (define apple (list 'apple $init)))))
+      'replace)
+    (with-output-to-file "testfile-wpo-main.ss"
+      (lambda ()
+        (pretty-print '(import (scheme) (testfile-wpo-banana) (testfile-wpo-coconut) (testfile-wpo-apple)))
+        (pretty-print '(pretty-print banana))
+        (pretty-print '(pretty-print coconut))
+        (pretty-print '(pretty-print apple)))
+      'replace)
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-imported-libraries #t]
+                        [generate-wpo-files #t])
+           (compile-program x)))
+      'wpo-main)
+    #t)
+
+  (equal?
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([generate-wpo-files #f])
+           (compile-whole-library (format "~a.wpo" x) (format "~a.so" x))))
+      'wpo-coconut)
+    "()\n")
+
+  (begin
+    (delete-file "testfile-wpo-coconut.wpo")
+    #t)
+  
+  (equal?
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([generate-wpo-files #f])
+           (compile-whole-library (format "~a.wpo" x) (format "~a.so" x))))
+      'wpo-apple)
+    "((testfile-wpo-coconut))\n")
+
+  (begin
+    (delete-file "testfile-wpo-banana.wpo")
+    (delete-file "testfile-wpo-apple.wpo")
+    (delete-file "testfile-wpo-banana.so")
+    #t)
+
+  (equal?
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([library-search-handler
+                         (let ([lsh (library-search-handler)])
+                           (lambda (who name dirs exts)
+                             (lsh who (if (equal? name '(testfile-wpo-banana))
+                                          '(testfile-wpo-apple)
+                                          name)
+                               dirs exts)))])
+           (compile-whole-program (format "~a.wpo" x) (format "~a.so" x))))
+      'wpo-main)
+    "((testfile-wpo-apple)\n  (testfile-wpo-banana)\n  (testfile-wpo-coconut))\n")
+
+  (equal?
+    (separate-eval 
+      '(parameterize ([library-search-handler
+                        (let ([lsh (library-search-handler)])
+                          (lambda (who name dirs exts)
+                            (lsh who (if (equal? name '(testfile-wpo-banana))
+                                         '(testfile-wpo-apple)
+                                         name)
+                                 dirs exts)))])
+         (load-program "testfile-wpo-main.so")))
+    (string-append
+      "(banana (apple->banana _) (_))\n"
+      "(coconut (apple->coconut _) (_))\n"
+      "(apple\n  (_ (apple->banana apple->banana _)\n     (apple->coconut apple->coconut _)))\n"))
+
+  (begin
+    ;; clean-up to make sure previous builds don't get in the way.
+    (delete-file "testfile-wpo-coconut.ss")
+    (delete-file "testfile-wpo-coconut.so")
+    (delete-file "testfile-wpo-coconut.wpo")
+
+    (delete-file "testfile-wpo-banana.ss")
+    (delete-file "testfile-wpo-banana.so")
+    (delete-file "testfile-wpo-banana.wpo")
+
+    (delete-file "testfile-wpo-apple.ss")
+    (delete-file "testfile-wpo-apple.so")
+    (delete-file "testfile-wpo-apple.wpo")
+
+    (delete-file "testfile-wpo-main.ss")
+    (delete-file "testfile-wpo-main.so")
+    (delete-file "testfile-wpo-main.wpo")
+
+    #t)
+
+  (begin
+    (with-output-to-file "testfile-wpo-coconut.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-coconut)
+             (export coconut banana->coconut apple->coconut)
+             (import (scheme))
+             (define $init (list '_))
+             (define banana->coconut (cons 'banana->coconut $init))
+             (define apple->coconut (cons 'apple->coconut $init))
+             (define coconut
+               (list 'coconut banana->coconut apple->coconut $init)))))
+      'replace)
+    (with-output-to-file "testfile-wpo-date.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-date)
+             (export date apple->date)
+             (import (scheme))
+             (define $init (list '_))
+             (define apple->date (cons 'apple->date $init))
+             (define date (list 'date apple->date $init)))))
+      'replace)
+    (with-output-to-file "testfile-wpo-apple.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-apple)
+             (export apple)
+             (import (scheme) (testfile-wpo-date) (testfile-wpo-coconut))
+             (define $init
+               (list
+                 '_
+                 (cons 'apple->date apple->date)
+                 (cons 'apple->coconut apple->coconut)))
+             (define apple (list 'apple $init)))))
+      'replace)
+    (with-output-to-file "testfile-wpo-banana.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-banana)
+             (export banana)
+             (import (scheme) (testfile-wpo-coconut))
+             (define $init
+               (list '_ (cons 'banana->coconut banana->coconut)))
+             (define banana (list 'banana $init)))))
+      'replace)
+    (with-output-to-file "testfile-wpo-main.ss"
+      (lambda ()
+        (pretty-print '(import (scheme) (testfile-wpo-date)
+                         (testfile-wpo-banana) (testfile-wpo-coconut)
+                         (testfile-wpo-apple)))
+        (pretty-print '(pretty-print date))
+        (pretty-print '(pretty-print banana))
+        (pretty-print '(pretty-print coconut))
+        (pretty-print '(pretty-print apple)))
+      'replace)
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-imported-libraries #t]
+                        [generate-wpo-files #t])
+           (compile-program x)))
+      'wpo-main)
+    #t)
+
+  (equal?
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([generate-wpo-files #f])
+           (compile-whole-library (format "~a.wpo" x) (format "~a.so" x))))
+      'wpo-coconut)
+    "()\n")
+
+  (begin
+    (delete-file "testfile-wpo-coconut.wpo")
+    #t)
+  
+  (equal?
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([generate-wpo-files #f])
+           (compile-whole-library (format "~a.wpo" x) (format "~a.so" x))))
+      'wpo-apple)
+    "((testfile-wpo-coconut))\n")
+
+  (begin
+    (delete-file "testfile-wpo-date.wpo")
+    (delete-file "testfile-wpo-apple.wpo")
+    (delete-file "testfile-wpo-date.so")
+    #t)
+
+  (equal?
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([library-search-handler
+                         (let ([lsh (library-search-handler)])
+                           (lambda (who name dirs exts)
+                             (lsh who (if (equal? name '(testfile-wpo-date))
+                                          '(testfile-wpo-apple)
+                                          name)
+                               dirs exts)))])
+           (compile-whole-program (format "~a.wpo" x) (format "~a.so" x))))
+      'wpo-main)
+    "((testfile-wpo-apple)\n  (testfile-wpo-date)\n  (testfile-wpo-coconut))\n")
+
+  (equal?
+    (separate-eval 
+      '(parameterize ([library-search-handler
+                       (let ([lsh (library-search-handler)])
+                         (lambda (who name dirs exts)
+                           (lsh who (if (equal? name '(testfile-wpo-date))
+                                        '(testfile-wpo-apple)
+                                        name)
+                             dirs exts)))])
+         (load-program "testfile-wpo-main.so")))
+    (string-append
+      "(date (apple->date _) (_))\n"
+      "(banana (_ (banana->coconut banana->coconut _)))\n"
+      "(coconut (banana->coconut _) (apple->coconut _) (_))\n"
+      "(apple\n"
+      "  (_ (apple->date apple->date _)\n"
+      "     (apple->coconut apple->coconut _)))\n"))
+
+  (begin
+    ;; clean-up to make sure previous builds don't get in the way.
+    (delete-file "testfile-wpo-coconut.ss")
+    (delete-file "testfile-wpo-coconut.so")
+    (delete-file "testfile-wpo-coconut.wpo")
+
+    (delete-file "testfile-wpo-date.ss")
+    (delete-file "testfile-wpo-date.so")
+    (delete-file "testfile-wpo-date.wpo")
+
+    (delete-file "testfile-wpo-banana.ss")
+    (delete-file "testfile-wpo-banana.so")
+    (delete-file "testfile-wpo-banana.wpo")
+
+    (delete-file "testfile-wpo-apple.ss")
+    (delete-file "testfile-wpo-apple.so")
+    (delete-file "testfile-wpo-apple.wpo")
+
+    (delete-file "testfile-wpo-main.ss")
+    (delete-file "testfile-wpo-main.so")
+    (delete-file "testfile-wpo-main.wpo")
+
+    #t)
+
+  (begin
+    (with-output-to-file "testfile-wpo-date.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-date)
+             (export date apple->date)
+             (import (scheme))
+             (define $init (list '_))
+             (define apple->date (cons 'apple->date $init))
+             (define date (list 'date apple->date $init)))))
+      'replace)
+    (with-output-to-file "testfile-wpo-eel.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-eel)
+             (export eel coconut->eel apple->eel)
+             (import (scheme))
+             (define $init (list '_))
+             (define coconut->eel (cons 'coconut->eel $init))
+             (define apple->eel (cons 'apple->eel $init))
+             (define eel (list 'eel coconut->eel apple->eel $init)))))
+      'replace)
+    (with-output-to-file "testfile-wpo-coconut.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-coconut)
+             (export coconut banana->coconut apple->coconut)
+             (import (scheme) (testfile-wpo-eel))
+             (define $init (list '_ (cons 'coconut->eel coconut->eel)))
+             (define banana->coconut (cons 'banana->coconut $init))
+             (define apple->coconut (cons 'apple->coconut $init))
+             (define coconut
+               (list 'coconut banana->coconut apple->coconut $init)))))
+      'replace)
+    (with-output-to-file "testfile-wpo-apple.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-apple)
+             (export apple)
+             (import (scheme) (testfile-wpo-date) (testfile-wpo-coconut)
+               (testfile-wpo-eel))
+             (define $init
+               (list
+                 '_
+                 (cons 'apple->date apple->date)
+                 (cons 'apple->coconut apple->coconut)
+                 (cons 'apple->eel apple->eel)))
+             (define apple (list 'apple $init)))))
+      'replace)
+    (with-output-to-file "testfile-wpo-banana.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-wpo-banana)
+             (export banana)
+             (import (scheme) (testfile-wpo-coconut))
+             (define $init
+               (list '_ (cons 'banana->coconut banana->coconut)))
+             (define banana (list 'banana $init)))))
+      'replace)
+    (with-output-to-file "testfile-wpo-main.ss"
+      (lambda ()
+        (pretty-print '(import (scheme) (testfile-wpo-date)
+                         (testfile-wpo-banana) (testfile-wpo-coconut)
+                         (testfile-wpo-apple) (testfile-wpo-eel)))
+        (pretty-print '(pretty-print date))
+        (pretty-print '(pretty-print banana))
+        (pretty-print '(pretty-print coconut))
+        (pretty-print '(pretty-print apple))
+        (pretty-print '(pretty-print eel)))
+      'replace)
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-imported-libraries #t]
+                        [generate-wpo-files #t])
+           (compile-program x)))
+      'wpo-main)
+    #t)
+
+  (equal?
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([generate-wpo-files #f])
+           (compile-whole-library (format "~a.wpo" x) (format "~a.so" x))))
+      'wpo-coconut)
+    "()\n")
+
+  (begin
+    (delete-file "testfile-wpo-eel.wpo")
+    (delete-file "testfile-wpo-coconut.wpo")
+    (delete-file "testfile-wpo-eel.so")
+    #t)
+  
+  (equal?
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([generate-wpo-files #f]
+                        [library-search-handler
+                         (let ([lsh (library-search-handler)])
+                           (lambda (who name dirs exts)
+                             (lsh who (if (equal? name '(testfile-wpo-eel))
+                                          '(testfile-wpo-coconut)
+                                          name)
+                               dirs exts)))])
+           (compile-whole-library (format "~a.wpo" x) (format "~a.so" x))))
+      'wpo-apple)
+    "((testfile-wpo-coconut) (testfile-wpo-eel))\n")
+
+  (begin
+    (delete-file "testfile-wpo-date.wpo")
+    (delete-file "testfile-wpo-apple.wpo")
+    (delete-file "testfile-wpo-date.so")
+    #t)
+
+  (equal?
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([library-search-handler
+                         (let ([lsh (library-search-handler)])
+                           (lambda (who name dirs exts)
+                             (lsh who (cond
+                                        [(equal? name '(testfile-wpo-date)) '(testfile-wpo-apple)]
+                                        [(equal? name '(testfile-wpo-eel)) '(testfile-wpo-coconut)]
+                                        [else name])
+                               dirs exts)))])
+           (compile-whole-program (format "~a.wpo" x) (format "~a.so" x))))
+      'wpo-main)
+    "((testfile-wpo-apple)\n  (testfile-wpo-date)\n  (testfile-wpo-coconut)\n  (testfile-wpo-eel))\n")
+
+  (equal?
+    (separate-eval 
+      '(parameterize ([library-search-handler
+                       (let ([lsh (library-search-handler)])
+                         (lambda (who name dirs exts)
+                           (lsh who (cond
+                                      [(equal? name '(testfile-wpo-date)) '(testfile-wpo-apple)]
+                                      [(equal? name '(testfile-wpo-eel)) '(testfile-wpo-coconut)]
+                                      [else name])
+                             dirs exts)))])
+         (load-program "testfile-wpo-main.so")))
+    (string-append
+      "(date (apple->date _) (_))\n"
+      "(banana\n"
+      "  (_ (banana->coconut\n"
+      "       banana->coconut\n"
+      "       _\n"
+      "       (coconut->eel coconut->eel _))))\n"
+      "(coconut\n"
+      "  (banana->coconut _ (coconut->eel coconut->eel _))\n"
+      "  (apple->coconut _ (coconut->eel coconut->eel _))\n"
+      "  (_ (coconut->eel coconut->eel _)))\n"
+      "(apple\n"
+      "  (_ (apple->date apple->date _)\n"
+      "     (apple->coconut\n"
+      "       apple->coconut\n"
+      "       _\n"
+      "       (coconut->eel coconut->eel _))\n"
+      "     (apple->eel apple->eel _)))\n"
+      "(eel (coconut->eel _) (apple->eel _) (_))\n"))
+
+  (begin
+    ;; clean-up to make sure previous builds don't get in the way.
+    (delete-file "testfile-wpo-coconut.ss")
+    (delete-file "testfile-wpo-coconut.so")
+    (delete-file "testfile-wpo-coconut.wpo")
+
+    (delete-file "testfile-wpo-eel.ss")
+    (delete-file "testfile-wpo-eel.so")
+    (delete-file "testfile-wpo-eel.wpo")
+
+    (delete-file "testfile-wpo-date.ss")
+    (delete-file "testfile-wpo-date.so")
+    (delete-file "testfile-wpo-date.wpo")
+
+    (delete-file "testfile-wpo-banana.ss")
+    (delete-file "testfile-wpo-banana.so")
+    (delete-file "testfile-wpo-banana.wpo")
+
+    (delete-file "testfile-wpo-apple.ss")
+    (delete-file "testfile-wpo-apple.so")
+    (delete-file "testfile-wpo-apple.wpo")
+
+    (delete-file "testfile-wpo-main.ss")
+    (delete-file "testfile-wpo-main.so")
+    (delete-file "testfile-wpo-main.wpo")
+
+    #t)
+
+  (begin
+    (with-output-to-file "testfile-deja-vu-one.ss"
+      (lambda ()
+        (pretty-print
+         '(library (testfile-deja-vu-one)
+            (export a)
+            (import (scheme))
+            (define a 3))))
+      'replace)
+    (with-output-to-file "testfile-deja-vu-two.ss"
+      (lambda ()
+        (pretty-print
+         '(library (testfile-deja-vu-two)
+            (export b)
+            (import (scheme) (testfile-deja-vu-one))
+            (define b (list 'b a)))))
+      'replace)
+    (with-output-to-file "testfile-deja-vu-dup.ss"
+      (lambda ()
+        (pretty-print
+         '(library (testfile-deja-vu-dup)
+            (export d)
+            (import (scheme) (testfile-deja-vu-one))
+            (define d (list a 'd)))))
+      'replace)
+    (with-output-to-file "testfile-deja-vu-main.ss"
+      (lambda ()
+        (for-each pretty-print
+          '((import (scheme) (testfile-deja-vu-one) (testfile-deja-vu-two) (testfile-deja-vu-dup))
+            (pretty-print (list a b d)))))
+      'replace)
+    (separate-eval
+     '(parameterize ([generate-wpo-files #t])
+        (compile-library "testfile-deja-vu-one")
+        (compile-library "testfile-deja-vu-two")
+        (compile-library "testfile-deja-vu-dup")
+        (compile-program "testfile-deja-vu-main")
+        (compile-whole-library "testfile-deja-vu-one.wpo" "testfile-deja-vu-one.done")
+        (compile-whole-library "testfile-deja-vu-two.wpo" "testfile-deja-vu-two.done")
+        (compile-whole-library "testfile-deja-vu-dup.wpo" "testfile-deja-vu-dup.done")))
+    #t)
+
+  (error?
+   (separate-eval
+    '(compile-whole-program "testfile-deja-vu-main.wpo" "testfile-deja-vu-main.done")))
+
+  (begin
+    (do ([stem '("one" "two" "dup" "main") (cdr stem)]) ((null? stem))
+      (do ([ext '("ss" "so" "wpo" "done") (cdr ext)]) ((null? ext))
+        (delete-file (format "testfile-deja-vu-~a.~a" (car stem) (car ext)))))
+    #t)
+
+  ; verify compatibility of generate-covin-files and generate-wpo-files
+  (begin
+    (mkfile "testfile-cwl-a14.ss"
+      '(library (testfile-cwl-a14) (export a) (import (scheme)) (define a 123)))
+    (parameterize ([generate-covin-files #t]
+                   [generate-wpo-files #t])
+      (compile-library "testfile-cwl-a14")
+      (compile-whole-library "testfile-cwl-a14.wpo" "testfile-cwl-a14.library"))
+    #t)
+
+  (file-exists? "testfile-cwl-a14.covin")
+
+  (eqv?
+    (let () (import (testfile-cwl-a14)) a)
+    123)
+
+  (eqv?
+    (separate-eval
+      '(verify-loadability 'load "testfile-cwl-a14.library"))
+    "")
 )
 
+(mat maybe-compile-whole
+  (begin
+    (delete-file "testfile-mcw-a1.so")
+    (delete-file "testfile-mcw-a1.wpo")
+    (delete-file "testfile-mcw-b1.so")
+    (delete-file "testfile-mcw-b1.wpo")
+    (delete-file "testfile-mcw-c1.so")
+    (delete-file "testfile-mcw-c1.wpo")
+    (with-output-to-file "testfile-mcw-ha1.ss"
+      (lambda ()
+        (pretty-print
+          '(define minor-msg-number 97)))
+      'replace)
+    (with-output-to-file "testfile-mcw-hb1.ss"
+      (lambda ()
+        (pretty-print
+          '(define major-msg-number 113)))
+      'replace)
+    (with-output-to-file "testfile-mcw-a1.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-mcw-a1)
+             (export a)
+             (import (chezscheme))
+             (define a "hello from a"))))
+      'replace)
+    (with-output-to-file "testfile-mcw-b1.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-mcw-b1)
+             (export b)
+             (import (chezscheme) (testfile-mcw-a1))
+             (include "testfile-mcw-ha1.ss")
+             (define b (lambda () (format "~a and b [~s]" a minor-msg-number))))))
+      'replace)
+    (with-output-to-file "testfile-mcw-c1.ss"
+      (lambda ()
+        (for-each pretty-print
+          '((import (chezscheme) (testfile-mcw-b1))
+            (include "testfile-mcw-hb1.ss")
+            (printf "~a and c [~s]\n" (b) major-msg-number))))
+      'replace)
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-imported-libraries #t] [generate-wpo-files #t])
+           (compile-program x)))
+      'mcw-c1)
+    #t)
 
+  (equal?
+    (separate-eval '(load-program "testfile-mcw-c1.so"))
+    "hello from a and b [97] and c [113]\n")
+
+  (begin
+    (with-output-to-file "testfile-mcw-a1.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-mcw-a1)
+             (export a)
+             (import (chezscheme))
+             (define a "greetings from a"))))
+      'replace)
+    (touch "testfile-mcw-a1.so" "testfile-mcw-a1.ss")
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-imported-libraries #t] [generate-wpo-files #t])
+           (maybe-compile-program x)))
+      'mcw-c1)
+    #t)
+
+  (equal?
+    (separate-eval '(load-program "testfile-mcw-c1.so"))
+    "greetings from a and b [97] and c [113]\n")
+
+  (begin
+    (separate-compile
+      '(lambda (x)
+         (compile-whole-program (format "~a.wpo" x) (format "~a.so" x)) #f)
+      'mcw-c1)
+    #t)
+
+  (equal?
+    (separate-eval '(load-program "testfile-mcw-c1.so"))
+    "greetings from a and b [97] and c [113]\n")
+
+  (begin
+    (with-output-to-file "testfile-mcw-a1.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-mcw-a1)
+             (export a)
+             (import (chezscheme))
+             (define a "salutations from a"))))
+      'replace)
+    (touch "testfile-mcw-a1.so" "testfile-mcw-a1.ss")
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-imported-libraries #t] [generate-wpo-files #t])
+           (parameterize ([compile-program-handler
+                            (lambda (ifn ofn)
+                              (compile-program ifn ofn)
+                              (compile-whole-program (format "~a.wpo" (path-root ofn)) ofn #t))])
+             (maybe-compile-program x))))
+      'mcw-c1)
+    #t)
+
+  (equal?
+    (separate-eval '(load-program "testfile-mcw-c1.so"))
+    "salutations from a and b [97] and c [113]\n")
+
+  (begin
+    (with-output-to-file "testfile-mcw-a1.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-mcw-a1)
+             (export a)
+             (import (chezscheme))
+             (define a "goodbye from a"))))
+      'replace)
+    (touch "testfile-mcw-a1.so" "testfile-mcw-a1.ss")
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-imported-libraries #t] [generate-wpo-files #t])
+           (parameterize ([compile-program-handler
+                            (lambda (ifn ofn)
+                              (compile-program ifn ofn)
+                              (compile-whole-program (format "~a.wpo" (path-root ofn)) ofn #t))])
+             (maybe-compile-program x))))
+      'mcw-c1)
+    #t)
+
+  (equal?
+    (separate-eval '(load-program "testfile-mcw-c1.so"))
+    "goodbye from a and b [97] and c [113]\n")
+
+  (begin
+    (with-output-to-file "testfile-mcw-hb1.ss"
+      (lambda ()
+        (pretty-print
+          '(define major-msg-number 773)))
+      'replace)
+    (touch "testfile-mcw-c1.so" "testfile-mcw-hb1.ss")
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-imported-libraries #t] [generate-wpo-files #t])
+           (parameterize ([compile-program-handler
+                            (lambda (ifn ofn)
+                              (compile-program ifn ofn)
+                              (compile-whole-program (format "~a.wpo" (path-root ofn)) ofn #t))])
+             (maybe-compile-program x))))
+      'mcw-c1)
+    #t)
+
+  (equal?
+    (separate-eval '(load-program "testfile-mcw-c1.so"))
+    "goodbye from a and b [97] and c [773]\n")
+
+  (begin
+    (with-output-to-file "testfile-mcw-a1.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-mcw-a1)
+             (export a)
+             (import (chezscheme))
+             (define a "hello again from a"))))
+      'replace)
+    (touch "testfile-mcw-a1.so" "testfile-mcw-a1.ss")
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-imported-libraries #t] [generate-wpo-files #t])
+           (parameterize ([compile-library-handler
+                            (lambda (ifn ofn)
+                              (compile-library ifn ofn)
+                              (compile-whole-library (format "~a.wpo" (path-root ofn)) ofn))])
+             (maybe-compile-library x))))
+      'mcw-b1)
+    #t)
+
+  (equal?
+    (separate-eval '(let () (import (testfile-mcw-b1)) (printf "~a\n" (b))))
+    "hello again from a and b [97]\n")
+
+  (begin
+    (with-output-to-file "testfile-mcw-ha1.ss"
+      (lambda ()
+        (pretty-print
+          '(define minor-msg-number -53)))
+      'replace)
+    (touch "testfile-mcw-a1.so" "testfile-mcw-a1.ss")
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-imported-libraries #t] [generate-wpo-files #t])
+           (parameterize ([compile-library-handler
+                            (lambda (ifn ofn)
+                              (compile-library ifn ofn)
+                              (compile-whole-library (format "~a.wpo" (path-root ofn)) ofn))])
+             (maybe-compile-library x))))
+      'mcw-b1)
+    #t)
+
+  (equal?
+    (separate-eval '(let () (import (testfile-mcw-b1)) (printf "~a\n" (b))))
+    "hello again from a and b [-53]\n")
+)
+
+(mat library-manager
+  (begin
+    (with-output-to-file "testfile-lm-a.ss"
+      (lambda ()
+        (pretty-print
+         '(library (testfile-lm-a)
+            (export ct-a rt-a)
+            (import (scheme))
+            (meta define ct-a (begin (display "ct-a rhs\n") 123))
+            (define rt-a (begin (display "rt-a rhs\n") 456)))))
+      'replace)
+    (with-output-to-file "testfile-lm-b.ss"
+      (lambda ()
+        (pretty-print
+         '(library (testfile-lm-b)
+            (export b)
+            (import (scheme) (testfile-lm-a))
+            (define-syntax (use-ct-val x) (if (odd? ct-a) #'"odd" #'"even"))
+            (define b use-ct-val))))
+      'replace)
+    (with-output-to-file "testfile-lm-c.ss"
+      (lambda ()
+        (pretty-print
+         '(library (testfile-lm-c)
+            (export c)
+            (import (scheme) (testfile-lm-a))
+            (define use-rt-val rt-a)
+            (define c use-rt-val))))
+      'replace)
+    (with-output-to-file "testfile-lm-combined.ss"
+      (lambda ()
+        (pretty-print
+         '(begin
+            (include "testfile-lm-a.ss")
+            (include "testfile-lm-b.ss")
+            (include "testfile-lm-c.ss"))))
+      'replace)
+    (with-output-to-file "testfile-lm-use-b.ss"
+      (lambda ()
+        (pretty-print
+         '(library (testfile-lm-use-b)
+            (export x)
+            (import (scheme) (testfile-lm-b))
+            (meta define x b))))
+      'replace)
+    (with-output-to-file "testfile-lm-use-c.ss"
+      (lambda ()
+        (pretty-print
+         '(library (testfile-lm-use-c)
+            (export x)
+            (import (scheme) (testfile-lm-c))
+            (define-syntax (x x) c))))
+      'replace)
+    #t)
+  (equal?
+   (separate-eval
+    '(import-notify #t)
+    '(compile-library "testfile-lm-a"))
+   (string-append
+    "compiling testfile-lm-a.ss with output to testfile-lm-a.so\n"
+    "ct-a rhs\n"))
+  (equal?
+   (separate-eval
+    '(import-notify #t)
+    '(library-extensions '((".ss" . ".so")))
+    '(compile-library "testfile-lm-b")
+    '(printf "b = ~s\n" (let () (import (testfile-lm-b)) b)))
+   (string-append
+    "compiling testfile-lm-b.ss with output to testfile-lm-b.so\n"
+    "import: found source file \"testfile-lm-a.ss\"\n"
+    "import: found corresponding object file \"testfile-lm-a.so\"\n"
+    "import: object file is not older\n"
+    "import: visiting object file \"testfile-lm-a.so\"\n"
+    "ct-a rhs\n"
+    "b = \"odd\"\n"))
+  (equal?
+   (separate-eval
+    '(import-notify #t)
+    '(library-extensions '((".ss" . ".so")))
+    '(compile-library "testfile-lm-c")
+    '(printf "c = ~s\n" (let () (import (testfile-lm-c)) c)))
+   (string-append
+    "compiling testfile-lm-c.ss with output to testfile-lm-c.so\n"
+    "import: found source file \"testfile-lm-a.ss\"\n"
+    "import: found corresponding object file \"testfile-lm-a.so\"\n"
+    "import: object file is not older\n"
+    "import: visiting object file \"testfile-lm-a.so\"\n"
+    "attempting to 'revisit' previously 'visited' \"testfile-lm-a.so\" for library (testfile-lm-a) run-time info\n"
+    "rt-a rhs\n"
+    "c = 456\n"))
+  (equal?
+   ;; library manager revisits object file containing a single library
+   ;; to resolve dependencies after earlier visit
+   (separate-eval
+    '(import-notify #t)
+    '(library-extensions '((".ss" . ".so")))
+    '(visit "testfile-lm-a.so")
+    '(let () (import (testfile-lm-c)) c))
+   (string-append
+    "import: found source file \"testfile-lm-c.ss\"\n"
+    "import: found corresponding object file \"testfile-lm-c.so\"\n"
+    "import: object file is not older\n"
+    "import: visiting object file \"testfile-lm-c.so\"\n"
+    "import: attempting to 'revisit' previously 'visited' \"testfile-lm-c.so\" for library (testfile-lm-c) run-time info\n"
+    "import: attempting to 'revisit' previously 'visited' \"testfile-lm-a.so\" for library (testfile-lm-a) run-time info\n"
+    "rt-a rhs\n"
+    "456\n"))
+  (equal?
+   ;; library manager visits object file containing a single library
+   ;; to resolve dependencies after earlier revisit
+   (separate-eval
+    '(import-notify #t)
+    '(library-extensions '((".ss" . ".so")))
+    '(revisit "testfile-lm-a.so")
+    '(let () (import (testfile-lm-b)) b))
+   (string-append
+    "import: found source file \"testfile-lm-b.ss\"\n"
+    "import: found corresponding object file \"testfile-lm-b.so\"\n"
+    "import: object file is not older\n"
+    "import: visiting object file \"testfile-lm-b.so\"\n"
+    "import: attempting to 'visit' previously 'revisited' \"testfile-lm-a.so\" for library (testfile-lm-a) compile-time info\n"
+    "import: attempting to 'revisit' previously 'visited' \"testfile-lm-b.so\" for library (testfile-lm-b) run-time info\n"
+    "\"odd\"\n"))
+  (equal?
+   (separate-eval
+    '(import-notify #t)
+    '(library-extensions '((".ss" . ".so")))
+    '(compile-file "testfile-lm-combined"))
+   (string-append
+    "compiling testfile-lm-combined.ss with output to testfile-lm-combined.so\n"
+    "ct-a rhs\n"))
+  (equal?
+   ;; library manager revisits object file containing related libraries
+   ;; to resolve dependencies after earlier visit
+   (separate-eval
+    '(import-notify #t)
+    '(visit "testfile-lm-combined.so")
+    '(let ()
+       (import (testfile-lm-a))
+       (define-syntax (foo x) ct-a)
+       (printf "foo = ~s\n" foo))
+    '(let () (import (testfile-lm-c)) c))
+   (string-append
+    "ct-a rhs\n"
+    "foo = 123\n"
+    "import: attempting to 'revisit' previously 'visited' \"testfile-lm-combined.so\" for library (testfile-lm-c) run-time info\n"
+    "rt-a rhs\n"
+    "456\n"))
+  (equal?
+   ;; library manager visits object file containing related libraries
+   ;; to resolve dependencies after earlier revisit
+   (separate-eval
+    '(import-notify #t)
+    '(revisit "testfile-lm-combined.so")
+    '(let ()
+       (import (testfile-lm-a))
+       (define foo rt-a)
+       (printf "foo = ~s\n" foo))
+    '(let () (import (testfile-lm-b)) b))
+   (string-append
+    "import: attempting to 'visit' previously 'revisited' \"testfile-lm-combined.so\" for library (testfile-lm-a) compile-time info\n"
+    "rt-a rhs\n"
+    "foo = 456\n"
+    "\"odd\"\n"))
+  (equal?
+   ;; library manager does not revisit due to earlier load
+   (separate-eval
+    '(import-notify #t)
+    '(load "testfile-lm-combined.so")
+    '(let ()
+       (import (testfile-lm-a))
+       (define-syntax (foo x) ct-a)
+       (printf "foo = ~s\n" foo))
+    '(let () (import (testfile-lm-c)) c))
+   (string-append
+    "ct-a rhs\n"
+    "foo = 123\n"
+    "rt-a rhs\n"
+    "456\n"))
+  (equal?
+   ;; library manager does not revisit due to earlier load
+   (separate-eval
+    '(import-notify #t)
+    '(load "testfile-lm-combined.so")
+    '(let ()
+       (import (testfile-lm-a))
+       (define foo rt-a)
+       (printf "foo = ~s\n" foo))
+    '(let () (import (testfile-lm-b)) b))
+   (string-append
+    "rt-a rhs\n"
+    "foo = 456\n"
+    "\"odd\"\n"))
+  )
+
+(mat verify-loadability
+  (error? ; invalid argument
+    (verify-loadability 'never))
+  (error? ; invalid argument
+    (verify-loadability 'never "hello.so"))
+  (error? ; invalid argument
+    (verify-loadability #f "hello.so" "goodbye.so"))
+  (error? ; invalid argument
+    (verify-loadability 'load 'hello))
+  (error? ; invalid argument
+    (verify-loadability 'load '(a . "testdir")))
+  (error? ; invalid argument
+    (verify-loadability 'load '#("a" "testdir")))
+  (error? ; invalid argument
+    (verify-loadability 'load "testfile1.so" "testfile2.so" 'hello))
+  (error? ; invalid argument
+    (verify-loadability 'load "testfile1.so" "testfile2.so" '(a . "testdir")))
+  (error? ; invalid argument
+    (verify-loadability 'load '("a" . hello)))
+  (error? ; invalid argument
+    (verify-loadability 'load '("a" . ("src" . "obj"))))
+  (error? ; invalid argument
+    (verify-loadability 'load '("a" . (("src" "obj")))))
+  (error? ; invalid argument
+    (verify-loadability 'load '("a" . ((("src" "obj"))))))
+  (begin
+    (define install
+      (lambda (dir . fn*)
+        (for-each
+          (lambda (fn)
+            (call-with-port (open-file-input-port fn)
+              (lambda (ip)
+                (call-with-port (open-file-output-port (format "~a/~a" dir (path-last fn)))
+                  (lambda (op)
+                    (put-bytevector op (get-bytevector-all ip)))))))
+          fn*)))
+    #t)
+  (eq? (verify-loadability 'visit) (void))
+  (eq? (verify-loadability 'revisit) (void))
+  (eq? (verify-loadability 'load) (void))
+  (error? ; not found
+    (verify-loadability 'load "probably not found"))
+  (begin
+    (mkfile "testfile-clA.ss"
+      '(import (chezscheme) (testfile-clB) (testfile-clC))
+      '(printf "~a, ~a\n" b c))
+    (mkfile "testfile-clB.ss"
+      '(library (testfile-clB)
+         (export b)
+         (import (chezscheme) (testfile-clB1))
+         (define-syntax go (lambda (x) (datum->syntax #'* (b1))))
+         (define b (go))))
+    (mkfile "testfile-clB1.ss"
+      '(library (testfile-clB1)
+         (export b1)
+         (import (chezscheme))
+         (define b1 (lambda () "hello from B1"))))
+    (mkfile "testfile-clC.ss"
+      '(library (testfile-clC)
+         (export c)
+         (import (chezscheme) (testfile-clC1))
+         (define c (c1))))
+    (mkfile "testfile-clC1.ss"
+      '(library (testfile-clC1)
+         (export c1)
+         (import (chezscheme))
+         (define-syntax c1 (syntax-rules () [(_) "hello from C1"]))))
+    (rm-rf "testdir-obj1")
+    (rm-rf "testdir-obj2")
+    (mkdir "testdir-obj1")
+    (mkdir "testdir-obj2")
+    (separate-eval
+      '(parameterize ([library-directories '(("." . "testdir-obj1"))] [compile-imported-libraries #t])
+         (compile-program "testfile-clA.ss" "testdir-obj1/testfile-clA.so")))
+    (separate-eval
+      '(parameterize ([library-directories '(("." . "testdir-obj2"))] [compile-imported-libraries #t])
+         (compile-program "testfile-clA.ss" "testdir-obj2/testfile-clA.so")))
+    #t)
+  (begin
+    (rm-rf "testdir-dist1")
+    (mkdir "testdir-dist1")
+    (install "testdir-dist1" "testdir-obj1/testfile-clA.so" "testdir-obj1/testfile-clB.so" "testdir-obj1/testfile-clC.so")
+    #t)
+  (eqv?
+    (separate-eval
+      '(parameterize ([cd "testdir-dist1"])
+         (verify-loadability 'visit "testfile-clA.so")
+         (verify-loadability 'revisit "testfile-clA.so")
+         (verify-loadability 'load "testfile-clA.so")))
+    "")
+  (equal?
+    (separate-eval
+      '(parameterize ([cd "testdir-dist1"])
+         (load-program "testfile-clA.so")))
+    "hello from B1, hello from C1\n")
+  (error? ; missing B1
+    (separate-eval
+      '(parameterize ([cd "testdir-dist1"])
+         (verify-loadability 'visit "testfile-clB.so"))))
+  (error? ; missing B1
+    (separate-eval
+      '(parameterize ([cd "testdir-dist1"])
+         (verify-loadability 'load "testfile-clB.so"))))
+  (error? ; missing C1
+    (separate-eval
+      '(parameterize ([cd "testdir-dist1"])
+         (verify-loadability 'visit "testfile-clC.so"))))
+  (error? ; missing C1
+    (separate-eval
+      '(parameterize ([cd "testdir-dist1"])
+         (verify-loadability 'load "testfile-clC.so"))))
+  (begin
+    (rm-rf "testdir-dist2")
+    (mkdir "testdir-dist2")
+    (install "testdir-dist2" "testdir-obj2/testfile-clA.so" "testdir-obj2/testfile-clB.so" "testdir-obj2/testfile-clC.so")
+    #t)
+  (equal?
+    (separate-eval
+      '(parameterize ([cd "testdir-dist2"])
+         (load-program "testfile-clA.so")))
+    "hello from B1, hello from C1\n")
+  (error? ; mismatched compilation instance
+    (separate-eval
+      '(verify-loadability 'revisit
+         '("testdir-dist1/testfile-clA.so" . "testdir-dist1")
+         '("testdir-dist2/testfile-clA.so" . "testdir-dist2"))))
+  (error? ; mismatched compilation instance
+    (separate-eval
+      '(verify-loadability 'load
+         '("testdir-dist1/testfile-clA.so" . "testdir-dist1")
+         '("testdir-dist2/testfile-clA.so" . "testdir-dist2"))))
+  (begin
+    (rm-rf "testdir-dist3")
+    (mkdir "testdir-dist3")
+    (install "testdir-dist3" "testdir-obj1/testfile-clA.so" "testdir-obj1/testfile-clB.so" "testdir-obj2/testfile-clC.so")
+    #t)
+  (error? ; mismatched compilation instance
+    (separate-eval
+      '(parameterize ([cd "testdir-dist3"])
+         (load-program "testfile-clA.so"))))
+  (eqv? ; no compile-time requirements, so no problem
+    (separate-eval
+      '(parameterize ([cd "testdir-dist3"])
+         (verify-loadability 'visit "testfile-clA.so")))
+    "")
+  (error? ; mismatched compilation instance
+    (separate-eval
+      '(parameterize ([cd "testdir-dist3"])
+         (verify-loadability 'revisit "testfile-clA.so"))))
+  (error? ; mismatched compilation instance
+    (separate-eval
+      '(parameterize ([cd "testdir-dist3"])
+         (verify-loadability 'load "testfile-clA.so"))))
+  (equal?
+    (separate-eval
+      '(parameterize ([cd "testdir-dist3"])
+         (unless (guard (c [else (printf "yes\n")]) (verify-loadability 'load "testfile-clA.so") #f)
+           (errorf #f "oops")))
+      '(parameterize ([cd "testdir-dist1"])
+         (printf "~s\n" (verify-loadability 'load "testfile-clA.so")))
+      '(parameterize ([cd "testdir-dist2"])
+         (printf "~s\n" (verify-loadability 'load "testfile-clA.so")))
+      '(let* ([ls (library-list)] [f (lambda (x) (and (member x ls) #t))])
+         (printf "~s\n" (map f '((testfile-clB) (testfile-clB1) (testfile-clC) (testfile-clC1)))))
+      '(parameterize ([cd "testdir-dist1"])
+         (load-program "testfile-clA.so"))
+      '(let* ([ls (library-list)] [f (lambda (x) (and (member x ls) #t))])
+         (printf "~s\n" (map f '((testfile-clB) (testfile-clB1) (testfile-clC) (testfile-clC1))))))
+    "yes\n#<void>\n#<void>\n(#f #f #f #f)\nhello from B1, hello from C1\n(#t #f #t #f)\n")
+  (equal?
+    (separate-eval
+      '(parameterize ([cd "testdir-dist3"])
+         (unless (guard (c [else (printf "yes\n")]) (verify-loadability 'load "testfile-clA.so") #f)
+           (errorf #f "oops")))
+      '(parameterize ([cd "testdir-dist1"])
+         (printf "~s\n" (verify-loadability 'load "testfile-clA.so")))
+      '(parameterize ([cd "testdir-dist2"])
+         (printf "~s\n" (verify-loadability 'load "testfile-clA.so")))
+      '(let* ([ls (library-list)] [f (lambda (x) (and (member x ls) #t))])
+         (printf "~s\n" (map f '((testfile-clB) (testfile-clB1) (testfile-clC) (testfile-clC1)))))
+      '(parameterize ([cd "testdir-dist2"])
+         (load-program "testfile-clA.so"))
+      '(let* ([ls (library-list)] [f (lambda (x) (and (member x ls) #t))])
+         (printf "~s\n" (map f '((testfile-clB) (testfile-clB1) (testfile-clC) (testfile-clC1))))))
+    "yes\n#<void>\n#<void>\n(#f #f #f #f)\nhello from B1, hello from C1\n(#t #f #t #f)\n")
+  (error? ; mismatched compilation instance
+    (separate-eval
+      '(parameterize ([library-directories '(("testdir-dist1" . "testdir-dist1"))])
+         (verify-loadability 'load "testdir-dist2/testfile-clA.so"))))
+  (error? ; mismatched compilation instance
+    (separate-eval
+      '(parameterize ([library-directories '(("testdir-dist1" . "testdir-dist1"))])
+         (verify-loadability 'load "testdir-dist1/testfile-clA.so" "testdir-dist2/testfile-clA.so"))))
+  (begin
+    (mkfile "testfile-clPD.ss"
+      '(import (chezscheme) (testfile-clD))
+      '(printf "~s\n" (make-Q)))
+    (mkfile "testfile-clPE.ss"
+      '(import (chezscheme) (testfile-clE))
+      '(printf "~s\n" (make-Q 73)))
+    (mkfile "testfile-clD.ss"
+      '(library (testfile-clD) (export make-Q Q? Q-x) (import (chezscheme) (testfile-clF))
+         (define-record-type Q
+           (nongenerative Q)
+           (fields x)
+           (protocol (lambda (new) (lambda () (new f)))))))
+    (mkfile "testfile-clE.ss"
+      '(library (testfile-clE) (export make-Q Q? Q-x) (import (chezscheme) (testfile-clG))
+         (define-record-type Q
+           (nongenerative Q)
+           (fields x y)
+           (protocol (lambda (new) (lambda (y) (new g y)))))))
+    (mkfile "testfile-clF.ss"
+      '(library (testfile-clF) (export f) (import (chezscheme)) (define f 77)))
+    (mkfile "testfile-clG.ss"
+      '(library (testfile-clG) (export g) (import (chezscheme)) (define g 123)))
+    (rm-rf "testdir-obj")
+    (mkdir "testdir-obj")
+    (separate-eval
+      '(parameterize ([library-directories '(("." . "testdir-obj"))] [compile-imported-libraries #t])
+         (compile-program "testfile-clPD.ss" "testdir-obj/testfile-clPD.so")))
+    (separate-eval
+      '(parameterize ([library-directories '(("." . "testdir-obj"))] [compile-imported-libraries #t])
+         (compile-program "testfile-clPE.ss" "testdir-obj/testfile-clPE.so")))
+    #t)
+  (begin
+    (rm-rf "testdir-dist")
+    (mkdir "testdir-dist")
+    (install "testdir-dist" "testdir-obj/testfile-clPD.so" "testdir-obj/testfile-clD.so" "testdir-obj/testfile-clF.so")
+    (install "testdir-dist" "testdir-obj/testfile-clPE.so" "testdir-obj/testfile-clE.so" "testdir-obj/testfile-clG.so")
+    #t)
+  (error? ; incompatible record-type Q
+    (separate-eval
+      '(cd "testdir-dist")
+      '(load-program "testfile-clPD.so")
+      '(load-program "testfile-clPE.so")))
+  (equal?
+    (separate-eval
+      '(cd "testdir-dist")
+      '(verify-loadability 'visit "testfile-clPD.so" "testfile-clPE.so")
+      '(verify-loadability 'visit "testfile-clD.so" "testfile-clE.so")
+      '(verify-loadability 'visit "testfile-clF.so" "testfile-clG.so")
+      '(verify-loadability 'revisit "testfile-clPD.so" "testfile-clPE.so")
+      '(verify-loadability 'revisit "testfile-clD.so" "testfile-clE.so")
+      '(verify-loadability 'revisit "testfile-clF.so" "testfile-clG.so")
+      '(verify-loadability 'load "testfile-clPD.so" "testfile-clPE.so")
+      '(verify-loadability 'load "testfile-clD.so" "testfile-clE.so")
+      '(verify-loadability 'load "testfile-clF.so" "testfile-clG.so")
+      '(verify-loadability 'load "testfile-clPD.so" "testfile-clPE.so" "testfile-clD.so" "testfile-clE.so" "testfile-clF.so" "testfile-clG.so")
+      '(load-program "testfile-clPD.so")
+      '(verify-loadability 'load "testfile-clPD.so" "testfile-clE.so"))
+    "#[Q 77]\n")
+  (equal?
+    (separate-eval
+      '(cd "testdir-dist")
+      '(verify-loadability 'visit "testfile-clPD.so" "testfile-clE.so")
+      '(verify-loadability 'visit "testfile-clD.so" "testfile-clE.so")
+      '(verify-loadability 'visit "testfile-clF.so" "testfile-clG.so")
+      '(verify-loadability 'revisit "testfile-clPD.so" "testfile-clE.so")
+      '(verify-loadability 'revisit "testfile-clD.so" "testfile-clE.so")
+      '(verify-loadability 'revisit "testfile-clF.so" "testfile-clG.so")
+      '(verify-loadability 'load "testfile-clPD.so" "testfile-clE.so")
+      '(verify-loadability 'load "testfile-clD.so" "testfile-clE.so")
+      '(verify-loadability 'load "testfile-clF.so" "testfile-clG.so")
+      '(verify-loadability 'load "testfile-clPD.so" "testfile-clPE.so" "testfile-clD.so" "testfile-clE.so" "testfile-clF.so" "testfile-clG.so")
+      '(load-program "testfile-clPE.so")
+      '(verify-loadability 'load "testfile-clPD.so" "testfile-clE.so"))
+    "#[Q 123 73]\n")
+  (begin
+    (mkfile "testfile-clH0.ss"
+      '(library (testfile-clH0) (export h0) (import (chezscheme))
+         (define h0 (lambda (x) (cons x 'a)))))
+    (mkfile "testfile-clH1.ss"
+      '(top-level-program
+         (import (chezscheme) (testfile-clH0))
+         (printf "~s\n" (h0 73))))
+    (mkfile "testfile-clH2.ss"
+      '(include "testfile-clH0.ss")
+      '(top-level-program
+         (import (chezscheme) (testfile-clH0))
+         (printf "~s\n" (h0 37))))
+    (rm-rf "testdir-obj")
+    (mkdir "testdir-obj")
+    (separate-eval
+      '(parameterize ([library-directories '(("." . "testdir-obj"))] [compile-imported-libraries #t])
+         (compile-file "testfile-clH1.ss" "testdir-obj/testfile-clH1.so")))
+    (separate-eval
+      '(parameterize ([library-directories '(("." . "testdir-obj"))] [compile-imported-libraries #t])
+         (compile-file "testfile-clH2.ss" "testdir-obj/testfile-clH2.so")))
+    #t)
+  (equal?
+    (separate-eval
+      '(parameterize ([library-directories '(("testdir-obj" . "testdir-obj"))])
+         (revisit "testdir-obj/testfile-clH1.so")))
+    "(73 . a)\n")
+  (equal?
+    (separate-eval
+      '(parameterize ([library-directories '(("testdir-obj" . "testdir-obj"))])
+         (revisit "testdir-obj/testfile-clH2.so")))
+    "(37 . a)\n")
+  (eqv?
+    (separate-eval
+      '(let ([libdirs '(("testdir-obj" . "testdir-obj"))])
+         (verify-loadability 'revisit (cons "testdir-obj/testfile-clH1.so" libdirs) (cons "testdir-obj/testfile-clH2.so" libdirs))))
+    "")
+  (error? ; mismatched compilation instance
+    (separate-eval
+      '(let ([libdirs '(("testdir-obj" . "testdir-obj"))])
+         (verify-loadability 'revisit (cons "testdir-obj/testfile-clH2.so" libdirs) (cons "testdir-obj/testfile-clH1.so" libdirs)))))
+
+  ; make sure verify-loadability respects eval-when forms
+  (begin
+    (mkfile "testfile-clI0.ss"
+      '(library (testfile-clI0) (export x) (import (chezscheme)) (define x 10) (printf "invoking I0\n")))
+    (mkfile "testfile-clI1.ss"
+      '(eval-when (visit)
+         (top-level-program
+           (import (chezscheme) (testfile-clI0))
+           (printf "running I1, x = ~s\n" x))))
+    (separate-eval
+      '(parameterize ([compile-imported-libraries #t])
+         (compile-file "testfile-clI1")))
+    #t)
+  (equal?
+    (separate-eval '(visit "testfile-clI1.so"))
+    "invoking I0\nrunning I1, x = 10\n")
+  (equal?
+    (separate-eval '(revisit "testfile-clI1.so"))
+    "")
+  (equal?
+    (separate-eval '(load "testfile-clI1.so"))
+    "invoking I0\nrunning I1, x = 10\n")
+  (eq?
+    (verify-loadability 'visit "testfile-clI1.so")
+    (void))
+  (eq?
+    (verify-loadability 'revisit "testfile-clI1.so")
+    (void))
+  (eq?
+    (verify-loadability 'load "testfile-clI1.so")
+    (void))
+  (delete-file "testfile-clI0.ss")
+  (delete-file "testfile-clI0.so")
+  (error?
+    (verify-loadability 'visit "testfile-clI1.so"))
+  (eq?
+    (verify-loadability 'revisit "testfile-clI1.so")
+    (void))
+  (error?
+    (verify-loadability 'load "testfile-clI1.so"))
+
+  ; make sure compile-whole-program perserves the information verify-loadability needs
+  (begin
+    (mkfile "testfile-clJ0.ss"
+      '(library (testfile-clJ0) (export x0) (import (chezscheme)) (define x0 'eat) (printf "invoking J0\n")))
+    (mkfile "testfile-clJ1.ss"
+      '(library (testfile-clJ1) (export x1) (import (chezscheme) (testfile-clJ0)) (define x1 (list x0 'oats)) (printf "invoking J1\n")))
+    (mkfile "testfile-clJ2.ss"
+      '(library (testfile-clJ2) (export x2) (import (chezscheme) (testfile-clJ1)) (define x2 (cons 'mares x1)) (printf "invoking J2\n")))
+    (mkfile "testfile-clJ3.ss"
+      '(import (chezscheme) (testfile-clJ2))
+      '(printf "running J3, x2 = ~s\n" x2))
+    (separate-eval
+      '(parameterize ([compile-imported-libraries #t] [generate-wpo-files #t])
+         (compile-program "testfile-clJ3")))
+    #t)
+
+  (equal?
+    (separate-eval '(verify-loadability 'load "testfile-clJ3.so"))
+    "")
+
+  (equal?
+    (separate-eval '(load-program "testfile-clJ3.so"))
+    "invoking J0\ninvoking J1\ninvoking J2\nrunning J3, x2 = (mares eat oats)\n")
+
+  (delete-file "testfile-clJ0.ss")
+  (delete-file "testfile-clJ0.wpo")
+  (delete-file "testfile-clJ2.ss")
+  (delete-file "testfile-clJ2.wpo")
+
+  ((lambda (x ls) (and (member x ls) #t))
+    (separate-eval
+      '(compile-whole-program "testfile-clJ3.wpo" "testfile-clJ3-all.so"))
+    '("((testfile-clJ0) (testfile-clJ2))\n"
+      "((testfile-clJ2) (testfile-clJ0))\n"))
+
+  (delete-file "testfile-clJ1.ss")
+  (delete-file "testfile-clJ1.wpo")
+  (delete-file "testfile-clJ1.so")
+
+  (equal?
+    (separate-eval '(verify-loadability 'load "testfile-clJ3-all.so"))
+    "")
+
+  (equal?
+    (separate-eval '(load-program "testfile-clJ3-all.so"))
+    "invoking J0\ninvoking J1\ninvoking J2\nrunning J3, x2 = (mares eat oats)\n")
+
+  (eq?
+    (rename-file "testfile-clJ0.so" "testfile-clJ0.sav")
+    (void))
+
+  (error? ; missing testfile-clJ0.so
+    (separate-eval '(verify-loadability 'load "testfile-clJ3-all.so")))
+
+  (error? ; missing testfile-clJ0.so
+    (separate-eval '(load-program "testfile-clJ3-all.so")))
+
+  (eq?
+    (rename-file "testfile-clJ0.sav" "testfile-clJ0.so")
+    (void))
+
+  (delete-file "testfile-clJ2.so")
+
+  (error? ; missing testfile-clJ2.so
+    (separate-eval '(verify-loadability 'load "testfile-clJ3-all.so")))
+
+  (error? ; missing testfile-clJ2.so
+    (separate-eval '(load-program "testfile-clJ3-all.so")))
+
+  (begin
+    (mkfile "testfile-clK0.ss"
+      '(library (testfile-clK0) (export x0) (import (chezscheme)) (define x0 "chocolate") (printf "invoking K0\n")))
+    (mkfile "testfile-clK1.ss"
+      '(library (testfile-clK1) (export x1) (import (chezscheme) (testfile-clK0)) (define x1 (format "~a chip" x0)) (printf "invoking K1\n")))
+    (mkfile "testfile-clK2.ss"
+      '(import (chezscheme) (testfile-clK1))
+      '(printf "running K2, x1 = ~s\n" x1))
+    (separate-eval
+      '(parameterize ([compile-imported-libraries #t])
+         (compile-program "testfile-clK2")))
+    #t)
+  (eq?
+    (verify-loadability 'visit "testfile-clK1.so")
+    (void))
+  (eq?
+    (verify-loadability 'revisit "testfile-clK1.so")
+    (void))
+  (eq?
+    (verify-loadability 'load "testfile-clK1.so")
+    (void))
+  (eq?
+    (verify-loadability 'visit "testfile-clK1.so" "testfile-clK2.so")
+    (void))
+  (eq?
+    (verify-loadability 'revisit "testfile-clK1.so" "testfile-clK2.so")
+    (void))
+  (eq?
+    (verify-loadability 'load "testfile-clK1.so" "testfile-clK2.so")
+    (void))
+  (eq?
+    (verify-loadability 'visit "testfile-clK2.so" "testfile-clK1.so")
+    (void))
+  (eq?
+    (verify-loadability 'revisit "testfile-clK2.so" "testfile-clK1.so")
+    (void))
+  (eq?
+    (verify-loadability 'load "testfile-clK2.so" "testfile-clK1.so")
+    (void))
+  (equal?
+    (separate-eval
+      '(visit "testfile-clK1.so")
+      '(let () (import (testfile-clK1)) x1))
+    "invoking K0\ninvoking K1\n\"chocolate chip\"\n")
+  (equal?
+    (separate-eval '(revisit "testfile-clK2.so"))
+    "invoking K0\ninvoking K1\nrunning K2, x1 = \"chocolate chip\"\n")
+  (eq?
+    (strip-fasl-file "testfile-clK0.so" "testfile-clK0.so"
+      (fasl-strip-options compile-time-information))
+    (void))
+  (error? ; missing compile-time info for K0
+    (verify-loadability 'visit "testfile-clK1.so"))
+  (eq?
+    (verify-loadability 'revisit "testfile-clK1.so")
+    (void))
+  (error? ; missing compile-time info for K0
+    (verify-loadability 'load "testfile-clK1.so"))
+  (error? ; missing compile-time info
+    (separate-eval
+      '(visit "testfile-clK1.so")
+      '(let () (import (testfile-clK1)) x1)))
+  (equal?
+    (separate-eval '(revisit "testfile-clK2.so"))
+    "invoking K0\ninvoking K1\nrunning K2, x1 = \"chocolate chip\"\n")
+)
+
+(mat concatenate-object-files
+  (begin
+    (define install
+      (lambda (dir . fn*)
+        (for-each
+          (lambda (fn)
+            (call-with-port (open-file-input-port fn)
+              (lambda (ip)
+                (call-with-port (open-file-output-port (format "~a/~a" dir (path-last fn)))
+                  (lambda (op)
+                    (put-bytevector op (get-bytevector-all ip)))))))
+          fn*)))
+    (define test-isolated-load
+      (lambda (fn lib val)
+        (rm-rf "testdir-isolated")
+        (mkdir "testdir-isolated")
+        (install "testdir-isolated" fn)
+        (separate-eval
+          `(cd "testdir-isolated")
+          `(load ,fn)
+          `(let ()
+             (import ,lib)
+             ,val))))
+    #t)
+  (begin
+    (mkfile "testfile-catlibA.ss"
+      '(library (testfile-catlibA)
+         (export a)
+         (import (chezscheme))
+         (define a 1)))
+    (mkfile "testfile-catlibB.ss"
+      '(library (testfile-catlibB)
+         (export a b)
+         (import (chezscheme) (testfile-catlibA))
+         (define b 2)))
+    (mkfile "testfile-catlibC.ss"
+      '(library (testfile-catlibC)
+         (export c)
+         (import (chezscheme) (testfile-catlibB))
+         (define c (+ a b))))
+    (separate-eval
+      '(compile-library "testfile-catlibA.ss" "testfile-catlibA.so"))
+    (separate-eval
+      '(compile-library "testfile-catlibB.ss" "testfile-catlibB.so"))
+    (separate-eval
+      '(compile-library "testfile-catlibC.ss" "testfile-catlibC.so"))
+    #t)
+  (eqv?
+    (separate-eval
+      '(begin
+         (concatenate-object-files "testfile-catlibAB.so" "testfile-catlibA.so" "testfile-catlibB.so")
+         (concatenate-object-files "testfile-catlibBC.so" "testfile-catlibB.so" "testfile-catlibC.so")
+         (concatenate-object-files "testfile-catlibABC.so" "testfile-catlibA.so" "testfile-catlibB.so" "testfile-catlibC.so")))
+    "")
+  (equal?
+    (test-isolated-load "testfile-catlibA.so" '(testfile-catlibA) 'a)
+    "1\n")
+  (error? ; can't find (testfile-catlibA)
+    (test-isolated-load "testfile-catlibB.so" '(testfile-catlibB) 'b))
+  (error? ; can't find (testfile-catlibA)
+    (test-isolated-load "testfile-catlibBC.so" '(testfile-catlibC) 'c))
+  (equal?
+    (test-isolated-load "testfile-catlibABC.so" '(testfile-catlibA) 'a)
+    "1\n")
+  (equal?
+    (test-isolated-load "testfile-catlibABC.so" '(testfile-catlibB) 'b)
+    "2\n")
+  (equal?
+    (test-isolated-load "testfile-catlibABC.so" '(testfile-catlibC) 'c)
+    "3\n")
+  (equal?
+    (test-isolated-load "testfile-catlibAB.so" '(testfile-catlibB) 'b)
+    "2\n")
+  (begin
+    (mkfile "testfile-cof1A.ss"
+      '(library (testfile-cof1A) (export a) (import (chezscheme))
+         (define-syntax a (identifier-syntax 45))))
+    (mkfile "testfile-cof1B.ss"
+      '(library (testfile-cof1B) (export b) (import (chezscheme) (testfile-cof1A))
+         (define b (lambda () (* a 2)))))
+    (mkfile "testfile-cof1P.ss"
+      '(import (chezscheme) (testfile-cof1A) (testfile-cof1B))
+      '(printf "a = ~s, (b) = ~s\n" a (b)))
+    (mkfile "testfile-cof1foo.ss"
+      '(printf "hello from foo!\n"))
+    (mkfile "testfile-cof1bar.ss"
+      '(printf "hello from bar!\n"))
+    (parameterize ([compile-imported-libraries #t]) (compile-program "testfile-cof1P"))
+    (compile-file "testfile-cof1foo")
+    (compile-file "testfile-cof1bar")
+    (let ()
+      (define fake-concatenate-object-files
+        (lambda (outfn infn . infn*)
+          (call-with-port (open-file-output-port outfn (file-options #;compressed replace))
+            (lambda (op)
+              (for-each
+                (lambda (infn)
+                  (put-bytevector op
+                    (call-with-port (open-file-input-port infn (file-options #;compressed)) get-bytevector-all)))
+                (cons infn infn*))))))
+      (fake-concatenate-object-files "testfile-cof1fooP.so" "testfile-cof1foo.so" "testfile-cof1P.so")
+      (fake-concatenate-object-files "testfile-cof1barB.so" "testfile-cof1bar.so" "testfile-cof1B.so"))
+    #t)
+  ; using separate-eval since A and B already loaded in the compiling process:
+  (equal?
+    (separate-eval '(load "testfile-cof1fooP.so"))
+    "hello from foo!\na = 45, (b) = 90\n")
+  (equal?
+    (separate-eval
+      '(load "testfile-cof1barB.so")
+      '(printf "~s\n" (and (member '(testfile-cof1B) (library-list)) 'yes)))
+    "hello from bar!\nyes\n")
+  (equal? (separate-eval '(verify-loadability 'visit "testfile-cof1barB.so")) "")
+  (equal? (separate-eval '(verify-loadability 'revisit "testfile-cof1barB.so")) "")
+  (delete-file "testfile-cof1A.so")
+  ; NB: this should be an error, but isn't because we're using the fake concatenate-object-files
+  (equal? (separate-eval '(verify-loadability 'visit "testfile-cof1barB.so")) "") ; requires testfile-cof1A.so
+  (equal? (separate-eval '(verify-loadability 'revisit "testfile-cof1barB.so")) "") ; doesn't require testfile-cof1A.so
+  
+  (equal? (separate-eval '(verify-loadability 'visit "testfile-cof1fooP.so")) "") ; doesn't require testfile-cof1A.so
+  (equal? (separate-eval '(verify-loadability 'revisit "testfile-cof1fooP.so")) "") ; doesn't require testfile-cof1A.so
+  (delete-file "testfile-cof1B.so")
+  (equal? (separate-eval '(verify-loadability 'visit "testfile-cof1fooP.so")) "") ; doesn't require testfile-cof1A.so or testfile-cof1B.so
+  ; NB: this should be an error, but isn't because we're using the fake concatenate-object-files
+  (equal? (separate-eval '(verify-loadability 'revisit "testfile-cof1fooP.so")) "") ; requires testfile-cof1B.so
+
+  ; now with the real concatenate-object-files
+  (begin
+    (separate-eval '(parameterize ([compile-imported-libraries #t]) (compile-program "testfile-cof1P")))
+    (concatenate-object-files "testfile-cof1fooP.so" "testfile-cof1foo.so" "testfile-cof1P.so")
+    (concatenate-object-files "testfile-cof1barB.so" "testfile-cof1bar.so" "testfile-cof1B.so")
+    #t)
+  ; using separate-eval since A and B already loaded in the compiling process:
+  (equal?
+    (separate-eval '(load "testfile-cof1fooP.so"))
+    "hello from foo!\na = 45, (b) = 90\n")
+  (equal?
+    (separate-eval
+      '(load "testfile-cof1barB.so")
+      '(printf "~s\n" (and (member '(testfile-cof1B) (library-list)) 'yes)))
+    "hello from bar!\nyes\n")
+  (equal? (separate-eval '(verify-loadability 'visit "testfile-cof1barB.so")) "")
+  (equal? (separate-eval '(verify-loadability 'revisit "testfile-cof1barB.so")) "")
+  (delete-file "testfile-cof1A.so")
+  (error? (separate-eval '(verify-loadability 'visit "testfile-cof1barB.so"))) ; requires testfile-cof1A.so
+  (equal? (separate-eval '(verify-loadability 'revisit "testfile-cof1barB.so")) "") ; doesn't require testfile-cof1A.so
+  
+  (equal? (separate-eval '(verify-loadability 'visit "testfile-cof1fooP.so")) "") ; doesn't require testfile-cof1A.so
+  (equal? (separate-eval '(verify-loadability 'revisit "testfile-cof1fooP.so")) "") ; doesn't require testfile-cof1A.so
+  (delete-file "testfile-cof1B.so")
+  (equal? (separate-eval '(verify-loadability 'visit "testfile-cof1fooP.so")) "") ; doesn't require testfile-cof1A.so or testfile-cof1B.so
+  (error? (separate-eval '(verify-loadability 'revisit "testfile-cof1fooP.so"))) ; requires testfile-cof1B.so
+)
 
 ;;; section 7.2:
 
@@ -3262,9 +5389,7 @@ evaluating module init
         'replace)
      ; compile in a separate Scheme process
       (if (windows?)
-          (system (format "echo (compile-file \"testfile\") | ~a"
-                    (list->string
-                      (subst #\\ #\/ (string->list *scheme*)))))
+          (system (format "echo (compile-file \"testfile\") | ~a" (patch-exec-path *scheme*)))
           (system (format "echo '(compile-file \"testfile\")' | ~a" *scheme*)))
       (load "testfile.so")
       (list (top-level-bound? '$notfribblefratz) (top-level-value '$notfribblefratz)))
@@ -3355,6 +5480,35 @@ evaluating module init
   (error? ; unexpected return from handler
     (parameterize ([exit-handler values])
       (exit 5)))
+  (begin
+    (define (exit-code expr)
+      (if (windows?)
+          (system (format "echo ~s | ~a -q" expr (patch-exec-path *scheme*)))
+          (system (format "echo '~s' | ~a -q" expr *scheme*))))
+    #t)
+  (eqv? (exit-code '(exit)) 0)
+  (eqv? (exit-code '(exit 15)) 15)
+  (eqv? (exit-code '(exit 0)) 0)
+  (eqv? (exit-code '(exit 24 7)) 24)
+  (eqv? (exit-code '(exit 0 1 2)) 0)
+  (eqv? (exit-code '(exit 3.14)) 1)
+  (eqv? (exit-code '(exit 9.8 3.14)) 1)
+  (begin
+    (with-output-to-file "testfile-exit.ss"
+      (lambda ()
+        (for-each pretty-print
+          '((import (scheme))
+            (apply exit (map string->number (command-line-arguments))))))
+      'replace)
+    #t)
+  (eqv? (system (format "~a --script testfile-exit.ss" (patch-exec-path *scheme*))) 0)
+  (eqv? (system (format "~a --script testfile-exit.ss 5" (patch-exec-path *scheme*))) 5)
+  (eqv? (system (format "~a --script testfile-exit.ss 0 1 2" (patch-exec-path *scheme*))) 0)
+  (eqv? (system (format "~a --script testfile-exit.ss 3 4 5" (patch-exec-path *scheme*))) 3)
+  (eqv? (system (format "~a --program testfile-exit.ss" (patch-exec-path *scheme*))) 0)
+  (eqv? (system (format "~a --program testfile-exit.ss 2" (patch-exec-path *scheme*))) 2)
+  (eqv? (system (format "~a --program testfile-exit.ss 0 1 2" (patch-exec-path *scheme*))) 0)
+  (eqv? (system (format "~a --program testfile-exit.ss 6 7 8" (patch-exec-path *scheme*))) 6)
  )
 
 (mat abort
@@ -3548,6 +5702,45 @@ evaluating module init
     (or (not a) (not (assq 'static (cdr a)))))
 )
 
+(mat collect-rendezvous
+  (begin
+    (define (check-working-gc collect)
+      (with-interrupts-disabled
+       (let ([p (weak-cons (gensym) #f)])
+         (collect)
+         (eq? (car p) #!bwp))))
+    (and (check-working-gc collect)
+         (check-working-gc collect-rendezvous)))
+      
+  (or (not (threaded?))
+      (let ([m (make-mutex)]
+            [c (make-condition)]
+            [done? #f])
+        (fork-thread
+         (lambda ()
+           (let loop ()
+             (mutex-acquire m)
+             (cond
+              [done?
+               (condition-signal c)
+               (mutex-release m)]
+              [else
+               (mutex-release m)
+               (loop)]))))
+        (and (check-working-gc collect-rendezvous)
+             ;; End thread:
+             (begin
+               (mutex-acquire m)
+               (set! done? #t)
+               (condition-wait c m)
+               (mutex-release m)
+               ;; Make sure the thread is really done
+               (let loop ()
+                 (unless (= 1 (#%$top-level-value '$active-threads))
+                   (loop)))
+               ;; Plain `collect` should work again:
+               (check-working-gc collect)))))
+  )
 
 ;;; section 7.6:
 

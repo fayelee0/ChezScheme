@@ -77,7 +77,7 @@ static ptr s_ee_read_char(IBOOL blockp) {
   ptr tc;
 #endif /* PTHREADS */
   BOOL succ;
-  static char buf[10];
+  static wchar_t buf[10];
   static int bufidx = 0;
   static int buflen = 0;
   static int rptcnt = 0;
@@ -95,7 +95,7 @@ static ptr s_ee_read_char(IBOOL blockp) {
     if (!blockp) {
        DWORD NumberOfEvents;
        if (!GetNumberOfConsoleInputEvents(hStdin, &NumberOfEvents))
-         S_error1("expeditor", "error getting console info: ~a",
+         S_error1("expeditor", "error getting console input: ~a",
                     S_LastErrorString());
        if (NumberOfEvents == 0) return Sfalse;
     }
@@ -104,13 +104,13 @@ static ptr s_ee_read_char(IBOOL blockp) {
     tc = get_thread_context();
     if (DISABLECOUNT(tc) == FIX(0)) {
         deactivate_thread(tc);
-        succ = ReadConsoleInput(hStdin, irInBuf, 1, &cNumRead);
+        succ = ReadConsoleInputW(hStdin, irInBuf, 1, &cNumRead);
         reactivate_thread(tc);
     } else {
-        succ = ReadConsoleInput(hStdin, irInBuf, 1, &cNumRead);
+        succ = ReadConsoleInputW(hStdin, irInBuf, 1, &cNumRead);
     }
 #else /* PTHREADS */
-    succ = ReadConsoleInput(hStdin, irInBuf, 1, &cNumRead);
+    succ = ReadConsoleInputW(hStdin, irInBuf, 1, &cNumRead);
 #endif /* PTHREADS */
 
 
@@ -125,10 +125,10 @@ static ptr s_ee_read_char(IBOOL blockp) {
         KEY_EVENT_RECORD ker = irInBuf[0].Event.KeyEvent; 
         rptcnt = ker.wRepeatCount;
         if (ker.bKeyDown) {
-          char c;
+          wchar_t c;
 
-          if (c = ker.uChar.AsciiChar) {
-           /* translate ^@ 2) and ^<space> to nul */
+          if (c = ker.uChar.UnicodeChar) {
+            /* translate ^<space> to nul */
             if (c == 0x20 && (ker.dwControlKeyState & (LEFT_CTRL_PRESSED|RIGHT_CTRL_PRESSED)))
               buf[0] = 0;
             else
@@ -508,12 +508,15 @@ static ptr s_ee_get_clipboard(void) {
   ptr x = S_G.null_string;
 
   if (OpenClipboard((HWND)0)) {
-    HANDLE h = GetClipboardData(CF_TEXT);
-     
-    if (h != (HANDLE *)0) {
-      char *s = (char *)GlobalLock(h);
-      if (s != (char *)0) x = Sstring(s);
-      GlobalUnlock(h);
+    HANDLE h = GetClipboardData(CF_UNICODETEXT);
+    if (h != NULL) {
+      wchar_t *w = (wchar_t*)GlobalLock(h);
+      if (w != NULL) {
+        char *s = Swide_to_utf8(w);
+        x = Sstring_utf8(s, -1);
+        free(s);
+        GlobalUnlock(h);
+      }
     }
     CloseClipboard();
   }
@@ -522,12 +525,15 @@ static ptr s_ee_get_clipboard(void) {
 }
 
 static void s_ee_write_char(wchar_t c) {
-  if (c > 255) c = '?';
-  putchar(c);
+  DWORD n;
+  WriteConsoleW(hStdout, &c, 1, &n, NULL);
 }
 
 #else /* WIN32 */
-#ifdef SOLARIS
+#include <limits.h>
+#ifdef DISABLE_CURSES
+#include "nocurses.h"
+#elif defined(SOLARIS)
 #define NCURSES_CONST
 #define CHTYPE int
 #include </usr/include/curses.h>
@@ -546,10 +552,23 @@ static void s_ee_write_char(wchar_t c) {
 #include <sys/ioctl.h>
 #include <wchar.h>
 #include <locale.h>
+#if !defined(__linux__) && !defined(__OpenBSD__) && !defined(__NetBSD__)
 #include <xlocale.h>
+#endif
 
 #if defined(TIOCGWINSZ) && defined(SIGWINCH) && defined(EINTR)
 #define HANDLE_SIGWINCH
+#endif
+
+#ifdef USE_MBRTOWC_L
+static locale_t the_locale;
+static locale_t uselocale_alt(locale_t l) {
+  locale_t old = the_locale;
+  the_locale = l;
+  return old;
+}
+# define uselocale(v) uselocale_alt(v)
+# define mbrtowc(pwc, s, n, ps) mbrtowc_l(pwc, s, n, ps, the_locale)
 #endif
 
 /* locally defined functions */
@@ -675,11 +694,15 @@ static ptr s_ee_read_char(IBOOL blockp) {
 #endif /* PTHREADS */
 
     if (n == 1) {
-      old_locale = uselocale(term_locale);
-      sz = mbrtowc(&wch, buf, 1, &term_out_mbs);
-      uselocale(old_locale);
-      if (sz == 1) {
-        return Schar(wch);
+      if (buf[0] == '\0') {
+        return Schar('\0');
+      } else {
+        old_locale = uselocale(term_locale);
+        sz = mbrtowc(&wch, buf, 1, &term_out_mbs);
+        uselocale(old_locale);
+        if (sz == 1) {
+          return Schar(wch);
+        }
       }
     }
 
@@ -886,8 +909,10 @@ static void s_ee_line_feed(void) {
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <sys/select.h>
+#endif /* LIBX11 */
 
 static ptr s_ee_get_clipboard(void) {
+#ifdef LIBX11
   static enum {UNINITIALIZED, INITIALIZED, FAILED} status = UNINITIALIZED;
   static int (*pXConvertSelection)(Display *, Atom, Atom, Atom, Window, Time);
   static int (*pXPending)(Display *display);
@@ -897,9 +922,11 @@ static ptr s_ee_get_clipboard(void) {
 
   static Display *D;
   static Window R, W;
+#endif /* LIBX11 */
 
   ptr p = S_G.null_string;
 
+#ifdef LIBX11
   if (status == UNINITIALIZED) {
     char *display_name;
     void *handle;
@@ -984,6 +1011,7 @@ static ptr s_ee_get_clipboard(void) {
       }
     }
   }
+#endif /* LIBX11 */
 
 #ifdef MACOSX
 #define PBPASTEBUFSIZE 1024
@@ -1011,11 +1039,6 @@ static ptr s_ee_get_clipboard(void) {
 
   return p;
 }
-#else /* LIBX11 */
-static ptr s_ee_get_clipboard(void) {
-  return S_G.null_string;
-}
-#endif
 
 static void s_ee_write_char(wchar_t wch) {
   locale_t old; char buf[MB_LEN_MAX]; size_t n;

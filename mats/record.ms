@@ -3132,6 +3132,129 @@
   (hashtable-ref h graph1 #f)
   (hashtable-ref h graph2 #f)
   (not (hashtable-ref h graph3 #f))
+
+  (begin
+    (define record-hash
+      (lambda (x hash)
+        (let ([rtd (record-rtd x)])
+          (do ([field-name* (csv7:record-type-field-names rtd) (cdr field-name*)]
+               [i 0 (fx+ i 1)]
+               [h 0 (+ h (hash ((csv7:record-field-accessor rtd i) x)))])
+            ((null? field-name*) h)))))
+    (define record-equal?
+      (lambda (x y e?)
+        (let ([rtd (record-rtd x)])
+          (and (eq? (record-rtd y) rtd)
+               (let f ([field-name* (csv7:record-type-field-names rtd)] [i 0])
+                 (or (null? field-name*)
+                     (and (let ([accessor (csv7:record-field-accessor rtd i)])
+                            (e? (accessor x) (accessor y)))
+                          (f (cdr field-name*) (fx+ i 1)))))))))
+    (define equiv?
+      (lambda (x y)
+        (parameterize ([default-record-equal-procedure record-equal?])
+          (equal? x y))))
+    (define equiv-hash
+      (lambda (x)
+        (parameterize ([default-record-hash-procedure record-hash])
+          (equal-hash x))))
+    (define-record-type frob (fields (mutable q)))
+    (define-record-type frub (fields (mutable x) y z))
+    (define frob-hash
+      (lambda (x hash)
+        (raise 'frob-hash)))
+    (define frob-equal?
+      (lambda (x y e?)
+        #f))
+    (define rthp
+      (lambda (rtd)
+        (case-lambda
+          [() (record-type-hash-procedure rtd)]
+          [(x) (record-type-hash-procedure rtd x)])))
+    (define rtep
+      (lambda (rtd)
+        (case-lambda
+          [() (record-type-equal-procedure rtd)]
+          [(x) (record-type-equal-procedure rtd x)])))
+    #t)
+  (not (record-type-equal-procedure (record-type-descriptor frob)))
+  (not (record-type-hash-procedure (record-type-descriptor frob)))
+  (not (record-type-equal-procedure (record-type-descriptor frub)))
+  (not (record-type-hash-procedure (record-type-descriptor frub)))
+  (equal?
+    (parameterize ([(rthp (record-type-descriptor frob)) record-hash])
+      (list
+        (record-hash-procedure (make-frob #\q))
+        (record-hash-procedure (make-frub 1 2 3))))
+    (list record-hash #f))
+  (equal?
+    (parameterize ([(rtep (record-type-descriptor frob)) record-equal?])
+      (list
+        (record-equal-procedure (make-frub 1 2 3) (make-frub 1 2 3))
+        (record-equal-procedure (make-frub 1 2 3) (make-frob #\q))
+        (record-equal-procedure (make-frob #\q) (make-frub 1 2 3))
+        (record-equal-procedure (make-frob #\q) (make-frob #\q))))
+    (list #f #f #f record-equal?))
+  (equal?
+    (parameterize ([default-record-hash-procedure record-hash])
+      (list
+        (record-hash-procedure (make-frob #\q))
+        (record-hash-procedure (make-frub 1 2 3))))
+    (list record-hash record-hash))
+  (equal?
+    (parameterize ([default-record-equal-procedure record-equal?])
+      (list
+        (record-equal-procedure (make-frub 1 2 3) (make-frub 1 2 3))
+        (record-equal-procedure (make-frub 1 2 3) (make-frob #\q))
+        (record-equal-procedure (make-frob #\q) (make-frub 1 2 3))
+        (record-equal-procedure (make-frob #\q) (make-frob #\q))))
+    (list record-equal? record-equal? record-equal? record-equal?))
+  (equal?
+    (parameterize ([default-record-hash-procedure record-hash]
+                   [(rthp (record-type-descriptor frob)) frob-hash])
+      (list
+        (record-hash-procedure (make-frob #\q))
+        (record-hash-procedure (make-frub 1 2 3))))
+    (list frob-hash record-hash))
+  (equal?
+    (parameterize ([default-record-equal-procedure record-equal?]
+                   [(rtep (record-type-descriptor frob)) frob-equal?])
+      (list
+        (record-equal-procedure (make-frub 1 2 3) (make-frub 1 2 3))
+        (record-equal-procedure (make-frub 1 2 3) (make-frob #\q))
+        (record-equal-procedure (make-frob #\q) (make-frub 1 2 3))
+        (record-equal-procedure (make-frob #\q) (make-frob #\q))))
+    (list record-equal? #f #f frob-equal?))
+  ((lambda (x) (and (integer? x) (exact? x) (nonnegative? x)))
+    (parameterize ([default-record-hash-procedure record-hash])
+      (equal-hash (vector 1 2 (make-frub 1 2 3) 5 (make-frob #\q) 7))))
+  (eq?
+    (guard (c [(eq? c 'frob-hash) 'yup] [else (raise c)])
+      (parameterize ([default-record-hash-procedure record-hash]
+                     [(rthp (record-type-descriptor frob)) frob-hash])
+        (equal-hash (list "hello" (make-frob #\q)))))
+    'yup)
+  ((lambda (x) (and (integer? x) (exact? x) (nonnegative? x)))
+    (parameterize ([default-record-hash-procedure record-hash]
+                   [(rthp (record-type-descriptor frob)) frob-hash])
+      (equal-hash (vector 1 2 (make-frub 1 2 3) 5 6))))
+  (equiv? (make-frob #\q) (make-frob #\q))
+  (equiv? (make-frub 1 2 3) (make-frub 1 2 3))
+  (not (parameterize ([(rtep (record-type-descriptor frob)) frob-equal?])
+         (equiv? (make-frob #\q) (make-frob #\q))))
+  (parameterize ([(rtep (record-type-descriptor frob)) frob-equal?])
+    (equiv? (make-frub 1 2 3) (make-frub 1 2 3)))
+  (equal?
+    (let ([ht (make-hashtable equiv-hash equiv?)])
+      (hashtable-set! ht (make-frob #\q) 'one)
+      (hashtable-set! ht (make-frub 1 2 3) 'two)
+      (hashtable-set! ht (make-frub 'a 'b 'c) 'three)
+      (list
+        (hashtable-ref ht (make-frob #\q) #f)
+        (hashtable-ref ht (make-frub 1 2 3) #f)
+        (hashtable-ref ht (make-frub 'a 'b 'c) #f)
+        (hashtable-ref ht (make-frub 'x 'y 'z) #f)))
+    '(one two three #f))
 )
 
 (mat record19
@@ -7569,7 +7692,7 @@
              '(#($cpoint 3 4 (rgb . red)) (rgb . red) #($point -8 -15))))))
     `(begin
        (set! $color->rgb (lambda (c) (#2%cons 'rgb c)))
-       (let ([g7 (lambda (n) n)])
+       (letrec ([g7 (lambda (n) n)])
          (#3%$set-top-level-value! 'rcd1
            (#3%$make-record-constructor-descriptor
              ',record-type-descriptor? #f g7 'define-record-type)))
@@ -7643,7 +7766,7 @@
              '(#($cpoint 3 4 (rgb . red)) (rgb . red) #($point -8 -15))))))
     `(begin
        (set! $color->rgb (lambda (c) (#3%cons 'rgb c)))
-       (let ([g7 (lambda (n) n)])
+       (letrec ([g7 (lambda (n) n)])
          (#3%$set-top-level-value! 'rcd1
            (#3%$make-record-constructor-descriptor
              ',record-type-descriptor? #f g7 'define-record-type)))
@@ -8208,7 +8331,7 @@
       (record? (make-xftr) (record-type-descriptor prnt)))
     #f)
   (equivalent-expansion?
-    (parameterize ([optimize-level 2] [enable-cp0 #t] [#%$suppress-primitive-inlining #f])
+    (parameterize ([optimize-level 2] [enable-cp0 #t] [#%$suppress-primitive-inlining #f] [compile-profile #f])
       (expand/optimize
         '(lambda (x)
            (define-record-type bar)
@@ -8217,7 +8340,7 @@
        (#3%record? x (#2%$make-record-type-descriptor #!base-rtd 'bar #f #f #f #f '#() 'define-record-type))))
 
   (equivalent-expansion?
-    (parameterize ([optimize-level 2] [enable-cp0 #t] [#%$suppress-primitive-inlining #f])
+    (parameterize ([optimize-level 2] [enable-cp0 #t] [#%$suppress-primitive-inlining #f] [compile-profile #f])
       (expand/optimize
         '(lambda (x)
            (define-record-type bar (sealed #t))
@@ -8484,6 +8607,24 @@
        (if b
            (#3%$object-ref 'scheme-object 'x ,fixnum?)
            72)))
+  ; ensure we're checking to make sure field names, accessors, and
+  ; mutators are identifiers
+  (error? ; invalid field spec
+    (define-record-type foo (fields 876)))
+  (error? ; invalid field spec
+    (define-record-type foo (fields (mutable (x)))))
+  (error? ; invalid field spec
+    (define-record-type foo (fields (immutable "spam"))))
+  (error? ; invalid field spec
+    (define-record-type foo (fields (immutable (x) foo-x))))
+  (error? ; invalid accessor name
+    (define-record-type foo (fields (immutable x (foo-x)))))
+  (error? ; invalid field spec
+    (define-record-type foo (fields (mutable (x) foo-x foo-x!))))
+  (error? ; invalid accessor name
+    (define-record-type foo (fields (mutable x (foo-x) foo-x!))))
+  (error? ; invalid accessor name
+    (define-record-type foo (fields (mutable x foo-x (foo-x!)))))
 )
 
 (mat define-record-type-extensions
@@ -8641,7 +8782,7 @@
     '(lambda (a) (#3%list (#3%cons a a) a)))
   ; oscar's example
   (equivalent-expansion?
-    (parameterize ([optimize-level 2] [enable-cp0 #t] [#%$suppress-primitive-inlining #f])
+    (parameterize ([optimize-level 2] [enable-cp0 #t] [#%$suppress-primitive-inlining #f] [compile-profile #f])
       (expand/optimize
         '(let ()
            (import scheme)
@@ -8654,7 +8795,7 @@
                r)))))
     `(lambda (x) (#3%$record ',record-type-descriptor? 37 (#2%+ 1 (#2%+ 1 x)))))
   (equivalent-expansion?
-    (parameterize ([optimize-level 3] [enable-cp0 #t] [#%$suppress-primitive-inlining #f])
+    (parameterize ([optimize-level 3] [enable-cp0 #t] [#%$suppress-primitive-inlining #f] [compile-profile #f])
       (expand/optimize
         '(let ()
            (import scheme)
@@ -8711,7 +8852,7 @@
                        (new q x)))))))
            (make-foo 3))))
     `(let ([ctr 0])
-       (let ([g0 (lambda (new) (lambda (q) (new q (begin (set! ctr (#2%+ 1 xtr)) ctr))))])
+       (letrec ([g0 (lambda (new) (lambda (q) (new q (begin (set! ctr (#2%+ 1 xtr)) ctr))))])
          (#3%$make-record-constructor-descriptor ',record-type-descriptor?  #f g0 'define-record-type)
          (#3%$record ',record-type-descriptor? 3 (begin (set! ctr (#2%+ 1 xtr)) ctr)))))
   (equivalent-expansion?
@@ -8730,7 +8871,7 @@
                        (new q x)))))))
            (make-foo 3))))
     `(let ([ctr 0])
-       (let ([g0 (lambda (new) (lambda (q) (new q (begin (set! ctr (#3%+ 1 xtr)) ctr))))])
+       (letrec ([g0 (lambda (new) (lambda (q) (new q (begin (set! ctr (#3%+ 1 xtr)) ctr))))])
          (#3%$make-record-constructor-descriptor ',record-type-descriptor?  #f g0 'define-record-type)
          (#3%$record ',record-type-descriptor? 3 (begin (set! ctr (#3%+ 1 xtr)) ctr)))))
   (error? ; invalid uid
@@ -8910,3 +9051,137 @@
            (#2%list #t #t)
            (#2%list #f (#2%record-type-sealed? rtd))))))
  )
+
+(define (cp0x3 cp0 x)
+  (cp0 (cp0 (cp0 x))))
+
+(define (member? o l)
+  (and (member o l) #t))
+ 
+(mat cp0-kar-kons-optimizations
+  ; for now, it's necesary to run cp0 three times to complete the reduction
+  (equal?
+    (with-output-to-string
+      (lambda ()
+        (define-record mybox (val))
+        (display (mybox-val (begin (display 1) (make-mybox 2))))))
+    "12")
+  (equivalent-expansion?
+    (parameterize ([optimize-level 2] [enable-cp0 #t] [run-cp0 cp0x3] [#%$suppress-primitive-inlining #f])
+      (expand/optimize
+        '(let ()
+           (define-record mybox (val))
+           (display (mybox-val (begin (display 1) (make-mybox 2)))))))
+    '(#2%display
+      (begin
+        (#2%display 1)
+        2)))
+  (eq? (let ()
+         (define-record kons (kar kdr))
+         (kons-kar (make-kons 'a 'b)))
+       'a)
+  (equivalent-expansion?
+    (parameterize ([optimize-level 2] [enable-cp0 #t] [run-cp0 cp0x3] [#%$suppress-primitive-inlining #f])
+      (expand/optimize
+        '(let ()
+           (define-record kons (kar kdr))
+           (kons-kar (make-kons 'a 'b)))))
+    ''a)
+  (eq? (let ()
+         (define-record kons (kar kdr))
+         (kons-kdr (make-kons 'a 'b)))
+       'b)
+  (equivalent-expansion?
+    (parameterize ([optimize-level 2] [enable-cp0 #t] [run-cp0 cp0x3] [#%$suppress-primitive-inlining #f])
+      (expand/optimize
+        '(let ()
+           (define-record kons (kar kdr))
+           (kons-kdr (make-kons 'a 'b)))))
+    ''b)
+  (member?
+    (with-output-to-string
+      (lambda ()
+        (define-record kons (kar kdr))
+        (display (kons-kar (make-kons (begin (display 1) (display 2) 3)
+                                      (begin (display 4) (display 5) 6))))))
+    '("45123" "12453"))
+  (equivalent-expansion?
+    (parameterize ([optimize-level 2] [enable-cp0 #t] [run-cp0 cp0x3] [#%$suppress-primitive-inlining #f])
+      (expand/optimize
+        '(let ()
+          (define-record kons (kar kdr))
+          (display (kons-kar (make-kons (begin (display 1) (display 2) 3)
+                                        (begin (display 4) (display 5) 6)))))))
+    '(#2%display
+      (begin
+        (#2%display 4)
+        (#2%display 5)
+        (#2%display 1)
+        (#2%display 2)
+        3)))
+  (member?
+    (with-output-to-string
+      (lambda ()
+        (define-record kons (kar kdr))
+        (display (kons-kdr (make-kons (begin (display 1) (display 2) 3)
+                                      (begin (display 4) (display 5) 6))))))
+    '("45126" "12456"))
+  (equivalent-expansion?
+    (parameterize ([optimize-level 2] [enable-cp0 #t] [run-cp0 cp0x3] [#%$suppress-primitive-inlining #f])
+      (expand/optimize
+        '(let ()
+          (define-record kons (kar kdr))
+          (display (kons-kdr (make-kons (begin (display 1) (display 2) 3)
+                                        (begin (display 4) (display 5) 6)))))))
+    '(#2%display
+      (begin
+        (#2%display 4)
+        (#2%display 5)
+        (#2%display 1)
+        (#2%display 2)
+        6)))
+  (equal?
+    (with-output-to-string
+      (lambda ()
+        (define-record ktail (kar (immutable kdr)))
+        (define x (make-ktail 1 2))
+        (display 3)
+        (display (ktail-kdr (begin (display 4) x)))))
+    "342")
+  (equivalent-expansion?
+    (parameterize ([optimize-level 2] [enable-cp0 #t] [run-cp0 cp0x3] [#%$suppress-primitive-inlining #f])
+      (expand/optimize
+        '(let ()
+          (define-record ktail (kar (immutable kdr)))
+          (define x (make-ktail 1 2))
+          (display 3)
+          (display (ktail-kdr (begin (display 4) x))))))
+    '(begin
+       (#2%display 3)
+       (#2%display
+        (begin
+          (#2%display 4)
+          2))))
+  (equal?
+    (with-output-to-string
+      (lambda ()
+        (define-record ktail (kar (immutable kdr)))
+        (define x (make-ktail 1 2))
+        (display 3)
+        (display (ktail-kar (begin (display 4) x)))))
+    "341")
+  (not (equivalent-expansion?
+         (parameterize ([optimize-level 2] [enable-cp0 #t] [run-cp0 cp0x3] [#%$suppress-primitive-inlining #f])
+           (expand/optimize
+             '(let ()
+               (define-record ktail (kar (immutable kdr)))
+               (define x (make-ktail 1 2))
+               (display 3)
+               (display (ktail-kar (begin (display 4) x))))))
+         '(begin
+            (#2%display 3)
+            (#2%display
+             (begin
+               (#2%display 4)
+               1)))))
+)

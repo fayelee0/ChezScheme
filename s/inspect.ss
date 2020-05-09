@@ -1,4 +1,3 @@
-"inspect.ss"
 ;;; inspect.ss
 ;;; Copyright 1984-2017 Cisco Systems, Inc.
 ;;; 
@@ -29,8 +28,7 @@
 ; ---port info should include file descriptor, perhaps provide access
 ;    location in file
 
-(define inspect)
-
+(begin
 (let ()
 
 (define-syntax make-dispatch-table
@@ -2187,7 +2185,7 @@
               [len ($continuation-stack-length x)]
               [lpm ($continuation-return-livemask x)])
           (cond
-            [(and (code-info? info) (find-rpi offset (code-info-rpis info))) =>
+            [(and (code-info? info) (code-info-rpis info) (find-rpi offset (code-info-rpis info))) =>
              (lambda (rpi)
                (let ([cookie '(chocolate . chip)])
                  (let ([vals (make-vector len cookie)] [vars (make-vector len '())] [live (code-info-live info)])
@@ -2880,3 +2878,4 @@
       [(x g) ($compute-composition x (filter-generation who g))])))
 
 (define object-counts (foreign-procedure "(cs)object_counts" () ptr))
+)

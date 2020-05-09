@@ -16,8 +16,8 @@
 m = ti3osx
 Cpu = I386
 
-mdclib = -liconv -lm -lncurses
-C = ${CC} ${CPPFLAGS} -m32 -Wpointer-arith -Wall -Wextra -Werror -O2 -msse2 -I/opt/X11/include/ ${CFLAGS}
+mdclib = -liconv -lm ${ncursesLib}
+C = ${CC} ${CPPFLAGS} -m32 -Wpointer-arith -Wall -Wextra -Wno-implicit-fallthrough -Werror -O2 -msse2 -I/opt/X11/include/ ${CFLAGS}
 o = o
 mdsrc = i3le.c
 mdobj = i3le.o
@@ -26,15 +26,21 @@ mdobj = i3le.o
 .SUFFIXES: .c .o
 
 .c.o:
-	$C -c -D${Cpu} -I${Include} -I../zlib $*.c
+	$C -c -D${Cpu} -I${Include} ${zlibInc} ${LZ4Inc} $*.c
 
 include Mf-base
 
-${Kernel}: ${kernelobj} ../zlib/libz.a
-	ld -r -o ${Kernel} ${kernelobj} ../zlib/libz.a
+${KernelO}: ${kernelobj} ${zlibDep} ${LZ4Dep}
+	${LD} -r -o ${KernelO} ${kernelobj} ${zlibLib} ${LZ4Lib}
 
-${Scheme}: ${Kernel} ${Main}
-	$C -o ${Scheme} ${Kernel} ${Main} ${mdclib} ${LDFLAGS}
+${KernelLib}: ${kernelobj}
+	${AR} ${ARFLAGS} ${KernelLib} ${kernelobj}
+
+${Scheme}: ${Kernel} ${KernelLinkDeps} ${Main}
+	$C -o ${Scheme} ${Main} ${Kernel} ${mdclib} ${KernelLinkLibs} ${LDFLAGS}
 
 ../zlib/configure.log:
-	(cd ../zlib; CFLAGS=-m32 ./configure)
+	(cd ../zlib; CFLAGS="${CFLAGS} -m32" ./configure)
+
+../lz4/lib/liblz4.a: ${LZ4Sources}
+	(cd ../lz4/lib; CFLAGS="${CFLAGS} -m32" ${MAKE} liblz4.a)

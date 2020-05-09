@@ -16,7 +16,7 @@
 m = tppc32le
 Cpu = PPC32
 
-mdclib = -lm -ldl -lncurses -lpthread -lrt
+mdclib = -lm -ldl ${ncursesLib} -lpthread -lrt -luuid
 C = ${CC} ${CPPFLAGS} -m32 -Wpointer-arith -Wextra -Werror -Wno-implicit-fallthrough -O2 -D_REENTRANT -pthread ${CFLAGS}
 o = o
 mdsrc = ppc32le.c
@@ -26,15 +26,21 @@ mdobj = ppc32le.o
 .SUFFIXES: .c .o
 
 .c.o:
-	$C -c -D${Cpu} -I${Include} -I../zlib $*.c
+	$C -c -D${Cpu} -I${Include} ${zlibInc} ${LZ4Inc} $*.c
 
 include Mf-base
 
-${Kernel}: ${kernelobj} ../zlib/libz.a
-	ld -r -X -o ${Kernel} ${kernelobj} ../zlib/libz.a
+${KernelO}: ${kernelobj} ${zlibDep} ${LZ4Dep}
+	${LD} -r -X -o ${KernelO} ${kernelobj} ${zlibLib} ${LZ4Lib}
 
-${Scheme}: ${Kernel} ${Main}
-	$C -rdynamic -o ${Scheme} ${Kernel} ${Main} ${mdclib} ${LDFLAGS}
+${KernelLib}: ${kernelobj}
+	${AR} ${ARFLAGS} ${KernelLib} ${kernelobj}
+
+${Scheme}: ${Kernel} ${KernelLinkDeps} ${Main}
+	$C -rdynamic -o ${Scheme} ${Main} ${Kernel} ${mdclib} ${KernelLinkLibs} ${LDFLAGS}
 
 ../zlib/configure.log:
-	(cd ../zlib; CFLAGS=-m32 ./configure)
+	(cd ../zlib; CFLAGS="${CFLAGS} -m32" ./configure)
+
+../lz4/lib/liblz4.a: ${LZ4Sources}
+	(cd ../lz4/lib; CFLAGS="${CFLAGS} -m32" ${MAKE} liblz4.a)

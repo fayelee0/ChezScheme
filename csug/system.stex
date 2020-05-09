@@ -1,4 +1,4 @@
-% Copyright 2005-2017 Cisco Systems, Inc.
+% Copyright 2005-2018 Cisco Systems, Inc.
 %
 % Licensed under the Apache License, Version 2.0 (the "License");
 % you may not use this file except in compliance with the License.
@@ -521,6 +521,8 @@ It is generally not a good idea, therefore, to establish handlers for
 memory faults, illegal instructions, and the like, since the code that
 causes the fault or illegal instruction will continue to execute
 (presumably erroneously) for some time before the handler is invoked.
+A finite amount of storage is used to buffer as-yet unhandled
+signals, after which additional signals are dropped.
 
 \scheme{register-signal-handler} is supported only on Unix-based
 systems.
@@ -979,6 +981,109 @@ The parameter \scheme{source-directories} (Section~\ref{SECTSYSTEMSOURCE})
 determines the set of directories searched for source files not identified
 by absolute path names.
 
+%----------------------------------------------------------------------------
+
+\entryheader
+\formdef{verify-loadability}{\categoryprocedure}{(verify-loadability \var{situation} \var{input} \dots)}
+\returns unspecified
+\listlibraries
+\endentryheader
+
+\noindent
+\var{situation} must be one of the symbols \scheme{visit}, \scheme{revisit}, or \scheme{load}.
+Each \var{input} must be a string pathname or a pair of a string pathname and a library search path.
+Each of the pathnames should name a file containing object code for a set of libraries and
+top-level programs, such as would be produced by
+\index{\scheme{compile-program}}\scheme{compile-program},
+\index{\scheme{compile-library}}\scheme{compile-library},
+\index{\scheme{compile-whole-program}}\scheme{compile-whole-program},
+or
+\index{\scheme{compile-whole-library}}\scheme{compile-whole-library}.
+A library search path must be a suitable argument for
+\index{\scheme{library-directories}}\scheme{library-directories}.
+
+\scheme{verify-loadability} verifies, without actually loading any
+code or definining any libraries, whether the object files named
+by the specified pathnames and their library dependencies, direct
+or indirect, are present, readable, and mutually compatible.
+The type of dependencies for each named object file is determined
+by the \var{situation} argument: compile-time dependencies for
+\var{visit}, run-time dependencies for \var{revisit} and both for
+\var{load}.
+
+For each input pathname that is paired with a search path,
+the \scheme{library-directories} parameter is parameterized to the
+library search path during the recursive search for dependencies
+of the programs and libraries found in the object file named by the
+pathname.
+
+If \scheme{verify-loadabilty} finds a problem, such as a missing
+library dependency or compilation-instance mismatch, it raises an
+exception with an appropriate condition.
+Otherwise, it returns an unspecified value.
+
+Since \scheme{verify-loadability} does not load or run any code
+from the files it processes, it cannot determine whether errors
+unrelated to missing or unreadable files or mutual compatibility
+will occur when the files are actually loaded.
+
+
+%----------------------------------------------------------------------------
+\entryheader
+\formdef{load-compiled-from-port}{\categoryprocedure}{(load-compiled-from-port \var{input-port})}
+\returns result of the last compiled expression
+\listlibraries
+\endentryheader
+
+\noindent
+\scheme{load-compiled-from-port} reads and evaluates the object-code contents
+of \var{input-port} as previously created by functions like \scheme{compile-file},
+\scheme{compile-script}, \scheme{compile-library}, and
+\scheme{compile-to-port}.
+
+The return value is the value of the last expression whose compiled
+form is in \var{input-port}. If \var{input-port} is empty, then the
+result value is unspecified.
+The port is left at end-of-file but is not closed.
+
+
+%----------------------------------------------------------------------------
+\entryheader
+\formdef{visit-compiled-from-port}{\categoryprocedure}{(visit-compiled-from-port \var{input-port})}
+\returns result of the last compiled expression processed
+\listlibraries
+\endentryheader
+
+\noindent
+\scheme{visit-compiled-from-port} reads and evaluates the object-code contents
+of \var{input-port} as previously created by functions like \scheme{compile-file},
+\scheme{compile-script}, \scheme{compile-library}, and
+\scheme{compile-to-port}.  In the process, it skips any revisit (run-time-only) code.
+
+The return value is the value of the last expression whose last non-revisit compiled
+form is in \var{input-port}. If there are no such forms, then the
+result value is unspecified.
+The port is left at end-of-file but is not closed.
+
+
+%----------------------------------------------------------------------------
+\entryheader
+\formdef{revisit-compiled-from-port}{\categoryprocedure}{(revisit-compiled-from-port \var{input-port})}
+\returns result of the last compiled expression processed
+\listlibraries
+\endentryheader
+
+\noindent
+\scheme{revisit-compiled-from-port} reads and evaluates the object-code contents
+of \var{input-port} as previously created by functions like \scheme{compile-file},
+\scheme{compile-script}, \scheme{compile-library}, and
+\scheme{compile-to-port}.  In the process, it skips any visit (compile-time-only) code.
+
+The return value is the value of the last expression whose last non-visit compiled
+form is in \var{input-port}. If there are no such forms, then the
+result value is unspecified.
+The port is left at end-of-file but is not closed.
+
 
 %----------------------------------------------------------------------------
 \entryheader
@@ -1108,7 +1213,9 @@ cp0-effort-limit
 cp0-score-limit
 cp0-outer-unroll-limit
 generate-inspector-information
+generate-procedure-source-information
 compile-profile
+generate-covin-files
 generate-interrupt-trap
 enable-cross-library-optimization
 \endschemedisplay
@@ -1140,11 +1247,6 @@ to 3 just while the remainder of file is compiled.
 \scheme{compile-script} is like \scheme{compile-file} but differs in
 that it copies the leading \scheme{#!} line from the
 source-file script into the object file.
-When the \scheme{#!} line is present it is uncompressed in the output
-file even when the parameter
-\index{\scheme{compile-compressed}}\scheme{compile-compressed} is
-set to \scheme{#t}, causing the remainder of the file to be compressed.
-This allows it to be interpreted properly by the operating system.
 
 \scheme{compile-script} permits compiled script files to be created from
 source script to reduce script load time.
@@ -1317,7 +1419,23 @@ The libraries incorporated into the resulting object file are visible (for
 use by \scheme{environment} and \scheme{eval}) if the \var{libs-visible?}
 argument is supplied and non-false.
 Any library incorporated into the resulting object file and required by
-an object file left to be loaded at run time is also visible.
+an object file left to be loaded at run time is also visible, as are any
+libraries the object file depends upon, regardless of the value of
+\var{libs-visible?}.
+
+\scheme{compile-whole-program} linearizes the initialization code for the
+set of incorporated libraries in a way that respects static
+dependencies among the libraries but not necessary dynamic dependencies
+deriving from initialization-time uses of \scheme{environment}
+or \scheme{eval}.
+Additional static dependencies can be added in most cases to force
+an ordering that allows the dynamic imports to succeed,
+though not in general since a different order might be required each
+time the program is run.
+Adding a static dependency of one library on a second requires
+adding an import of the second in the first as well as a run-time
+reference to one of the variables exported by the second in the
+body of the first.
 
 \var{input-filename} and \var{output-filename} must be strings.
 \var{input-filename} must identify a wpo file, and a wpo or object
@@ -1355,42 +1473,49 @@ all libraries are automatically made visible, and a new wpo file is
 produced (when \scheme{generate-wpo-files} is \scheme{#t}) as well
 as an object file for the resulting combination of libraries.
 
+The comment in the description of \scheme{compile-whole-program}
+about the effect of initialization-code linearization on dynamic
+dependencies applies to \scheme{compile-whole-library} as well.
+
 %----------------------------------------------------------------------------
 \entryheader
 \formdef{compile-port}{\categoryprocedure}{(compile-port \var{input-port} \var{output-port})}
 \formdef{compile-port}{\categoryprocedure}{(compile-port \var{input-port} \var{output-port} \var{sfd})}
 \formdef{compile-port}{\categoryprocedure}{(compile-port \var{input-port} \var{output-port} \var{sfd} \var{wpo-port})}
+\formdef{compile-port}{\categoryprocedure}{(compile-port \var{input-port} \var{output-port} \var{sfd} \var{wpo-port} \var{covop})}
 \returns unspecified
 \listlibraries
 \endentryheader
 
 \noindent
 \var{input-port} must be a textual input port.
-\var{output-port} and, if present, \var{wpo-port} must be binary output ports.
-If present, \var{sfd} must be a source-file descriptor.
+\var{output-port} and, if present and non-false, \var{wpo-port} must be binary output ports.
+If present and non-false, \var{sfd} must be a source-file descriptor.
+If present and non-false, \var{covop} must be a textual output port.
 
 \scheme{compile-port} is like \scheme{compile-file} except that it takes
 input from an arbitrary textual input port and sends output to an arbitrary
 binary output port.
-If \var{sfd} is present, it is passed to the reader so that source information
+If \var{sfd} is supplied, it is passed to the reader so that source information
 can be associated with the expressions read from \var{input-port}.
 It is also used to associate block-profiling information with the input
 file name encapsulated within \var{sfd}.
-If \var{wpo-port} is present, it sends whole-program optimization information
-to \var{wpo-port} for use by \scheme{compile-whole-program}.
+If \var{wpo-port} is supplied, \scheme{compile-port} sends whole-program optimization information
+to \var{wpo-port} for use by \scheme{compile-whole-program}, as if
+(and regardless of whether) \scheme{generate-wpo-files} is set.
+If \var{covop} is supplied, \scheme{compile-port} sends coverage information to
+\var{covop}, as if (and regardless of whether) \scheme{generate-covin-files} is set.
 
-None of the ports is closed automatically after compilation; it is assumed
-that the program that opens the ports and invokes \scheme{compile-port}
+The ports are closed automatically after compilation under the assumption
+the program that opens the ports and invokes \scheme{compile-port}
 will take care of closing the ports.
-The output will be compressed only if \var{binary-output-port} is set up
-to do compression, e.g., if it was opened with the \scheme{compressed}
-file option.
 
 %----------------------------------------------------------------------------
 \entryheader
 \formdef{compile-to-port}{\categoryprocedure}{(compile-to-port \var{obj-list} \var{output-port})}
 \formdef{compile-to-port}{\categoryprocedure}{(compile-to-port \var{obj-list} \var{output-port} \var{sfd})}
 \formdef{compile-to-port}{\categoryprocedure}{(compile-to-port \var{obj-list} \var{output-port} \var{sfd} \var{wpo-port})}
+\formdef{compile-to-port}{\categoryprocedure}{(compile-to-port \var{obj-list} \var{output-port} \var{sfd} \var{wpo-port} \var{covop})}
 \returns see below
 \listlibraries
 \endentryheader
@@ -1410,16 +1535,15 @@ input from a list of objects and sends output to an arbitrary binary
 output port.
 \var{sfd} is used to associate block-profiling information with the
 input file name encapsulated within \var{sfd}.
-If \var{wpo-port} is present, it sends whole-program optimization information
-to \var{wpo-port} for use by \scheme{compile-whole-program}.
+If \var{wpo-port} is present, \var{compile-to-port} sends whole-program optimization information
+to \var{wpo-port} for use by \scheme{compile-whole-program}, as if
+(and regardless of whether) \scheme{generate-wpo-files} is set.
+If \var{covop} is present, \var{compile-to-port} sends coverage information to
+\var{covop}, as if (and regardless of whether) \scheme{generate-covin-files} is set.
 
-The output port is not closed automatically after compilation; it is assumed
-that the program that opens the port and invokes \scheme{compile-to-port}
+The ports are not closed automatically after compilation under the assumption
+the program that opens the port and invokes \scheme{compile-to-port}
 will take care of closing the port.
-
-The output will be compressed only if \var{binary-output-port} is set up
-to do compression, e.g., if it was opened with the \scheme{compressed}
-file option.
 
 When \var{obj-list} contains a single list-structured element whose
 first-element is the symbol \scheme{top-level-program},
@@ -1455,6 +1579,21 @@ first-element is the symbol \scheme{top-level-program},
 \scheme{compile-to-file} returns a list of the libraries the top-level
 program requires at run time, as with \scheme{compile-program}.
 Otherwise, the return value is unspecified.
+
+%----------------------------------------------------------------------------
+\entryheader
+\formdef{concatenate-object-files}{\categoryprocedure}{(concatenate-object-files \var{out-file} \var{in-file_1} \var{in-file_2} \dots)}
+\returns unspecified
+\listlibraries
+\endentryheader
+
+\var{out-file} and each \var{in-file} must be strings.
+
+\scheme{concatenate-object-files} combines the header information
+contained in the object files named by each \var{in-file}.  It then
+writes the combined header information to the file named by
+\var{out-file}, followed by the remaining object code from each
+input file in turn.
 
 %----------------------------------------------------------------------------
 \entryheader
@@ -1835,7 +1974,7 @@ If instead this file were compiled, using \scheme{compile-file}, the
 compiler would arrange to define \scheme{mvlet} before continuing
 with the expansion and evaluation of the \scheme{mvlet} expression,
 but it would not arrange to define \scheme{nodups?}.
-Thus the expansion of the \scheme{mvlet} expression would fails.
+Thus the expansion of the \scheme{mvlet} expression would fail.
 
 In this case it does not help to evaluate the syntactic extension alone.
 A solution in this case would be to move the definition of
@@ -2394,6 +2533,21 @@ is included in a file, generation of inspector information will be
 disabled only for the remainder of that particular file.
 
 %----------------------------------------------------------------------------
+\entryheader\label{desc:generate-procedure-source-information}
+\formdef{generate-procedure-source-information}{\categorythreadparameter}{generate-procedure-source-information}
+\listlibraries
+\endentryheader
+
+\noindent
+When \scheme{generate-inspector-information} is set to \scheme{#f} and
+this parameter is set to \scheme{#t}, then a source location is preserved
+for a procedure, even though other inspector information is not preserved.
+Source information provides a small amount of debugging support at a
+much lower cost in memory and object-file size than full inspector information.
+If this parameter is changed during the compilation of a file, the
+original value will be restored.
+
+%----------------------------------------------------------------------------
 \entryheader
 \formdef{enable-cross-library-optimization}{\categorythreadparameter}{enable-cross-library-optimization}
 \listlibraries
@@ -2424,20 +2578,6 @@ The name of the \scheme{wpo} file is derived from the output-file
 name by replacing the object-file extension (normally \scheme{.so})
 with \scheme{.wpo}, or adding the extension \scheme{.wpo} if the
 object filename has no extension or has the extension \scheme{.wpo}.
-
-%----------------------------------------------------------------------------
-\entryheader
-\formdef{compile-compressed}{\categorythreadparameter}{compile-compressed}
-\listlibraries
-\endentryheader
-
-\noindent
-When this parameter is \scheme{#t}, the default, \scheme{compile-file},
-\scheme{compile-library}, \scheme{compile-script},
-\scheme{compile-program}, \scheme{compile-to-file},
-\scheme{compile-whole-program}, and \scheme{strip-fasl-file} compress
-the object files they create.
-
 
 %----------------------------------------------------------------------------
 \entryheader
@@ -2633,6 +2773,34 @@ reach this decision if the effort and outer unroll limits are large.
 
 %----------------------------------------------------------------------------
 \entryheader
+\formdef{commonization-level}{\categorythreadparameter}{commonization-level}
+\listlibraries
+\endentryheader
+
+After running the main source optimization pass (cp0) for the last time, the
+compiler optionally runs a \emph{commonization} pass.
+The pass commonizes the code for lambda expressions that have
+identical structure by abstracting differences at certain leaves
+of the program, namely constants, references to unassigned variables,
+and references to primitives.
+The parameter \scheme{commonization-level} controls whether commonization
+is run and, if so, how aggressive it is.
+Its value must be a nonnegative exact integer ranging from 0 through 9.
+When the parameter is set to 0, the default, commonization is not run.
+Otherwise, higher values result in more commonization.
+
+Commonization can undo some of the effects of cp0's inlining, can
+add run-time overhead, and can complicate debugging, particularly
+at higher commonization levels, which is why it is disabled by
+default.
+On the other hand, for macros or other meta programs that can
+generate large, mostly similar lambda expressions, enabling
+commonization can result in significant savings in object-code size
+and even reduce run-time overhead by making more efficient use of
+instruction caches.
+
+%----------------------------------------------------------------------------
+\entryheader
 \formdef{undefined-variable-warnings}{\categorythreadparameter}{undefined-variable-warnings}
 \listlibraries
 \endentryheader
@@ -2707,12 +2875,17 @@ With source profiling enabled, the compiler instruments the code
 it produces to count the number of times each source-code expression
 is executed.
 This information can be
-displayed in HTML format or packaged in a list for
-arbitrary user-defined processing.
+displayed in HTML format, or it can be packaged in a list or
+source table for arbitrary user-defined processing.
 It can also be dumped to a file to be loaded subsequently into the
 compiler's database of profile information for use in source-level
 optimizations, such as reordering the clauses of a \scheme{case}
 or \scheme{exclusive-cond} form.
+In connection with coverage-information (covin) files generated by the
+compiler when
+\index{\scheme{generate-covin-files}}\scheme{generate-covin-files}
+is \scheme{#t}, profile information can also be used to gauge coverage
+of a source-code base by a set of tests.
 
 The association between source-code expressions and profile counts
 is usually established via annotations produced by the reader and
@@ -2767,7 +2940,7 @@ or to the boolean value \scheme{#t}.
 The profile information can be dumped via:
 
 \begin{description}
-\item[\scheme{profile-dump-html}]\index{\scheme{profile-dump=html}}
+\item[\scheme{profile-dump-html}]\index{\scheme{profile-dump-html}}
 in HTML format to allow the programmer to visualize how
 often each expression is executed using a color-coding system that
 makes it easy to spot ``hot spots,''
@@ -2968,6 +3141,38 @@ The code generated when \scheme{compile-profile} is non-false is
 larger and less efficient, so this parameter should be set only
 when profile information is needed.
 
+The profile counters for code compiled when profile instrumentation
+is enabled are retained indefinitely, even if the code with which
+they are associated is reclaimed by the garbage collector.
+This results in more complete and accurate profile data but can lead
+to space leaks in programs that dynamically generate or load code.
+Such programs can avoid the potential space leak by releasing the
+counters explicitly via the procedure
+\index{\scheme{profile-release-counters}}\scheme{profile-release-counters}.
+
+
+%----------------------------------------------------------------------------
+\entryheader
+\formdef{generate-covin-files}{\categorythreadparameter}{generate-covin-files}
+\listlibraries
+\endentryheader
+
+When this parameter is set to \scheme{#t}, the compiler generates
+``coverage-information'' (covin) files that can be used in connection with
+profile information to measure coverage of a source-code base by a
+set of tests.
+One covin file is created for each object file, with the object-file
+extension replaced by the extension \scheme{.covin}.
+Each covin file contains the printed representation of a source table
+(Section~\ref{SECTSYNTAXSOURCETABLES}), compressed using the compression
+format and level specified by \scheme{compress-format} and
+\scheme{compress-level}.
+This information can be read via
+\index{\scheme{get-source-table!}}\scheme{get-source-table!} and used
+as a universe of source expressions to identify source expressions
+that are not evaluated during the running of a set of tests.
+
+
 \entryheader
 \formdef{profile}{\categorysyntax}{(profile \var{source-object})}
 \returns unspecified
@@ -2978,7 +3183,7 @@ A \scheme{profile} form has the effect of accounting to the source
 position identified by \var{source-object} the number of times the
 \scheme{profile} form is executed.
 Profile forms are generated implicitly by the expander for source
-expressions in annorated input, e.g., input read by the compiler or
+expressions in annotated input, e.g., input read by the compiler or
 interpreter from a Scheme source file, so this form is typically
 useful only when unannotated source code is produced by the front
 end for some language that targets Scheme.
@@ -3010,6 +3215,17 @@ the counts associated with each section of code are set to zero.
 
 %----------------------------------------------------------------------------
 \entryheader
+\formdef{profile-release-counters}{\categoryprocedure}{(profile-release-counters)}
+\returns unspecified
+\listlibraries
+\endentryheader
+
+\noindent
+Calling this procedure causes profile information associated with reclaimed
+code objects to be dropped.
+
+%----------------------------------------------------------------------------
+\entryheader
 \formdef{profile-dump}{\categoryprocedure}{(profile-dump)}
 \returns a list of pairs of source-object and count
 \listlibraries
@@ -3035,6 +3251,62 @@ preserves complete source objects, including their embedded source-file
 descriptors.
 It might be used, for example, to dump profile information to a
 fasl file on one machine for subsequent processing on another.
+
+\index{\scheme{with-profile-tracker}}\scheme{with-profile-tracker}
+can be used to obtain the same set of counts as a source table.
+
+
+%----------------------------------------------------------------------------
+\entryheader
+\formdef{with-profile-tracker}{\categoryprocedure}{(with-profile-tracker \var{thunk})}
+\formdef{with-profile-tracker}{\categoryprocedure}{(with-profile-tracker \var{preserve-existing?} \var{thunk})}
+\returns a source table and the values returned by \var{thunk}
+\listlibraries
+\endentryheader
+
+\var{thunk} must be a procedure and should accept zero arguments.
+It may return any number of values.
+
+\scheme{with-profile-tracker} invokes \var{thunk} without arguments.
+If \var{thunk} returns $n$ values \scheme{\var{x_1}, \var{x_2}, \dots, \var{x_n}}, \scheme{with-profile-tracker}
+returns $n+1$ values \scheme{\var{st}, \var{x_1}, \var{x_2}, \dots, \var{x_n}}, where \var{st} is a
+source table associating source objects with profile counts.
+If \var{preserve-existing?} is absent or \scheme{#f}, each count
+represents the number of times the source expression represented
+by the associated source object is evaluated during the invocation
+of \var{thunk}.
+Otherwise, each count represents the number of times the source
+expression represented by the associated source object is evaluated
+before or during the invocation of \var{thunk}.
+
+Profile data otherwise cleared by a call to
+\index{\scheme{profile-clear}}\scheme{profile-clear} or
+\index{\scheme{profile-release-counters}}\scheme{profile-release-counters}
+during the invocation of \var{thunk} is included in the
+resulting table.
+That is, invoking these procedures while \var{thunk} is running has
+no effect on the resulting counts.
+On the other hand, profile data cleared before \scheme{with-profile-tracker}
+is invoked is not included in the resulting table.
+
+The idiom \scheme{(with-profile-tracker #t values)} can be used to obtain
+the current set of profile counts as a source table.
+
+
+%----------------------------------------------------------------------------
+\entryheader
+\formdef{source-table-dump}{\categoryprocedure}{(source-table-dump \var{source-table})}
+\returns a list of pairs of source objects and their associated values in \var{source-table}
+\listlibraries
+\endentryheader
+
+This procedure can be used to convert a source-table produced by
+\index{\scheme{with-profile-tracker}}\scheme{with-profile-tracker} or some other mechanism into the form returned
+by \index{\scheme{profile-dump}}\scheme{profile-dump} for use as an argument to
+\index{\scheme{profile-dump-html}}\scheme{profile-dump-html},
+\index{\scheme{profile-dump-list}}\scheme{profile-dump-list},
+or
+\index{\scheme{profile-dump-data}}\scheme{profile-dump-data}.
 
 %----------------------------------------------------------------------------
 \entryheader
@@ -3115,7 +3387,7 @@ frequently executed code.
 This value of this parameter must be a string or \scheme{#f}.
 If it is a string, the string should contain an HTML cascading style sheet (CSS)
 color specifier.
-If the parameter is set to string, \scheme{profile-dump-html} includes line numbers
+If the parameter is set to a string, \scheme{profile-dump-html} includes line numbers
 in its html rendering of each source file, using the specified color.
 If the parameter is set to \scheme{#f}, no line numbers are included.
 
@@ -3132,7 +3404,7 @@ This procedure produces a dump of all
 profile information present in \var{dump}, which defaults to
 the value returned by \scheme{profile-dump}.
 It returns a list of entries, each of which is itself a list containing the
-following elements identify one block of code and how many times it
+following elements identifying one block of code and how many times it
 has been executed.
 
 \begin{itemize}
@@ -3479,8 +3751,8 @@ If the current caf\'e is the original caf\'e, or if \scheme{exit}
 is called from a script, \scheme{exit} exits from Scheme.
 In this case, the exit code for the Scheme process is 0 if
 no arguments were supplied or if the first argument is void,
-the value of the first argument
-if it is a 32-bit exact integer, and -1 otherwise.
+the value of the first argument cast to a C int if
+it is an exact integer of the host machine's bit width, and 1 otherwise.
 
 %----------------------------------------------------------------------------
 \entryheader
@@ -4334,7 +4606,7 @@ in bytes, including not only the bytes occupied for Scheme objects
 but also various forms of overhead, including fragmentation and
 reserved but not currently occupied memory, and is thus an accurate
 measure of the amount of heap memory currently reserved from the
-the operating system for the current process.
+operating system for the current process.
 
 %----------------------------------------------------------------------------
 \entryheader
@@ -5007,8 +5279,6 @@ is associated with \var{key}.
 environment of the process,
 where it is available to the current process (e.g., via \var{getenv})
 and any spawned processes.
-The key and value are copied into storage allocated outside of
-the Scheme heap; this space is never reclaimed.
 
 \schemedisplay
 (putenv "SCHEME" "rocks!")

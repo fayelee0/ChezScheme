@@ -1,4 +1,4 @@
-;;; 5-5.ms
+;;; 5_6.ms
 ;;; Copyright 1984-2017 Cisco Systems, Inc.
 ;;; 
 ;;; Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,18 +38,34 @@
  )
 
 (mat $vector-ref-check?
-  (let ([v (make-vector 3)] [not-v (make-fxvector 3)])
+  (let ([v (make-vector 3)] [imm-v (vector->immutable-vector (make-vector 3))] [not-v (make-fxvector 3)])
     (let ([i-1 -1] [i0 0] [i1 1] [i2 2] [i3 3] [ifalse #f] [ibig (+ (most-positive-fixnum) 1)])
       (and
         (not (#%$vector-ref-check? not-v i0))
         (not (#%$vector-ref-check? v ifalse))
+        (not (#%$vector-ref-check? imm-v ifalse))
         (not (#%$vector-ref-check? v i-1))
+        (not (#%$vector-ref-check? imm-v i-1))
+        (#%$vector-ref-check? v 0)
+        (#%$vector-ref-check? v 1)
+        (#%$vector-ref-check? v 2) 
+        (#%$vector-ref-check? imm-v 0)
+        (#%$vector-ref-check? imm-v 1)
+        (#%$vector-ref-check? imm-v 2)
         (#%$vector-ref-check? v i0)
         (#%$vector-ref-check? v i1)
-        (#%$vector-ref-check? v i2)
+        (#%$vector-ref-check? v i2) 
+        (#%$vector-ref-check? imm-v i0)
+        (#%$vector-ref-check? imm-v i1)
+        (#%$vector-ref-check? imm-v i2)
+        (not (#%$vector-ref-check? v 3))
         (not (#%$vector-ref-check? v i3))
-        (not (#%$vector-ref-check? v ibig)))))
+        (not (#%$vector-ref-check? v ibig))
+        (not (#%$vector-ref-check? imm-v 3))
+        (not (#%$vector-ref-check? imm-v i3))
+        (not (#%$vector-ref-check? imm-v ibig)))))
  )
+
 
 (mat vector-ref
     (eqv? (vector-ref '#(a b c) 0) 'a)
@@ -191,17 +207,31 @@
  )
 
 (mat $fxvector-ref-check?
-  (let ([fv (make-fxvector 3)] [not-fv (make-vector 3)])
+  (let ([fv (make-fxvector 3)] [imm-fv (fxvector->immutable-fxvector (make-fxvector 3))] [not-fv (make-vector 3)])
     (let ([i-1 -1] [i0 0] [i1 1] [i2 2] [i3 3] [ifalse #f] [ibig (+ (most-positive-fixnum) 1)])
       (and
         (not (#%$fxvector-ref-check? not-fv i0))
         (not (#%$fxvector-ref-check? fv ifalse))
         (not (#%$fxvector-ref-check? fv i-1))
+        (not (#%$fxvector-ref-check? imm-fv i-1))
+        (#%$fxvector-ref-check? fv 0)
+        (#%$fxvector-ref-check? fv 1)
+        (#%$fxvector-ref-check? fv 2)
+        (#%$fxvector-ref-check? imm-fv 0)
+        (#%$fxvector-ref-check? imm-fv 1)
+        (#%$fxvector-ref-check? imm-fv 2)
         (#%$fxvector-ref-check? fv i0)
         (#%$fxvector-ref-check? fv i1)
         (#%$fxvector-ref-check? fv i2)
+        (#%$fxvector-ref-check? imm-fv i0)
+        (#%$fxvector-ref-check? imm-fv i1)
+        (#%$fxvector-ref-check? imm-fv i2)
+        (not (#%$fxvector-ref-check? fv 3))
         (not (#%$fxvector-ref-check? fv i3))
-        (not (#%$fxvector-ref-check? fv ibig)))))
+        (not (#%$fxvector-ref-check? fv ibig))
+        (not (#%$fxvector-ref-check? imm-fv 3))
+        (not (#%$fxvector-ref-check? imm-fv i3))
+        (not (#%$fxvector-ref-check? imm-fv ibig)))))
  )
 
 (mat fxvector-ref
@@ -978,6 +1008,40 @@
       (u a p k f 1) (v b q l g 2) (w c r m h 3) (x d s n i 4)
       (y e t o j 5) (a u p k f 1) (b v q l g 2) (c w r m h 3)
       (d x s n i 4) (e y t o j 5)))
+ ; check for proper tail recursion
+   (equal?
+     (list
+       (let ([s (statistics)])
+         (let ([k 100000] [v '#(a b c)])
+           (let ([n k] [m 0])
+             (define (f) (unless (fx= n 0) (vector-for-each foo v)))
+             (define (foo x)
+               (set! m (+ m 1))
+               (when (eq? x (vector-ref v (fx- (vector-length v) 1)))
+                 (set! n (- n 1))
+                 (f)
+                 17)) ; blow tail recursion here
+             (f)
+             (list (> (sstats-bytes (sstats-difference (statistics) s))
+                      10000)
+                   (eqv? n 0)
+                   (eqv? m (* k (vector-length v)))))))
+       (let ([s (statistics)])
+         (let ([k 100000] [v '#(a b c)])
+           (let ([n k] [m 0])
+             (define (f) (unless (fx= n 0) (vector-for-each foo v)))
+             (define (foo x)
+               (set! m (+ m 1))
+               (when (eq? x (vector-ref v (fx- (vector-length v) 1)))
+                 (set! n (- n 1))
+                 (f)))
+             (f)
+             (list (<= 0
+                      (sstats-bytes (sstats-difference (statistics) s))
+                      1000)
+                   (eqv? n 0)
+                   (eqv? m (* k (vector-length v))))))))
+     '((#t #t #t) (#t #t #t)))
  )
 
 (define $merge-sort
@@ -1189,4 +1253,50 @@
 
     (error? (fxvector-set! immutable-123-fxvector 0 1))
     (error? (fxvector-fill! immutable-123-fxvector 0))
+)
+
+(mat vector-cas!
+  (begin
+    (define vec1 (vector 1 2 3))
+    (define vec2 (vector 'apple 'banana 'coconut))
+    (eq? 1 (vector-ref vec1 0)))
+  (not (vector-cas! vec1 0 0 1))
+  (eq? 1 (vector-ref vec1 0))
+  (vector-cas! vec1 0 1 4)
+  (eq? 4 (vector-ref vec1 0))
+  (not (vector-cas! vec1 0 1 5))
+
+  (not (vector-cas! vec1 1 0 1))
+  (eq? 2 (vector-ref vec1 1))
+  (vector-cas! vec1 1 2 5)
+  (eq? 5 (vector-ref vec1 1))
+
+  (not (vector-cas! vec2 0 'banana 'donut))
+  (vector-cas! vec2 0 'apple 'donut)
+  (not (vector-cas! vec2 0 'apple 'eclair))
+  (eq? 'donut (vector-ref vec2 0))
+
+  (not (vector-cas! vec2 1 'apple 'fig))
+  (vector-cas! vec2 1 'banana 'fig)
+  (not (vector-cas! vec2 1 'banana 'grape))
+  (eq? 'fig (vector-ref vec2 1))
+
+  (error? (vector-cas! vec1)) ; arity
+  (error? (vector-cas! vec1 1)) ; arity
+  (error? (vector-cas! vec1 1 2)) ; arity
+  (error? (vector-cas! 1 vec1 2 3)) ; not a vector
+  (error? (vector-cas! (vector->immutable-vector vec1) 1 2 3)) ; not a mutable vector
+  (error? (vector-cas! vec1 vec1 2 3)) ; not a fixnum
+  (error? (vector-cas! vec1 (expt 2 100) 2 3)) ; not a fixnum
+  (error? (vector-cas! vec1 -1 2 3)) ; out of range
+  (error? (vector-cas! vec1 5 2 3)) ; out of range
+
+  ;; make sure `vector-cas!` works with GC generations:
+  (begin
+    (collect 0)
+    (let ([g1 (gensym)])
+      (and (vector-cas! vec2 2 'coconut g1)
+           (begin
+             (collect 0)
+             (eq? g1 (vector-ref vec2 2))))))
 )

@@ -1,4 +1,3 @@
-"cpvalid.ss"
 ;;; cpvalid.ss
 ;;; Copyright 1984-2017 Cisco Systems, Inc.
 ;;; 
@@ -17,10 +16,10 @@
 ;;; see comments relating to both cpvalid and cpletrec at front of
 ;;; cpletrec.ss
 
+(begin
 (define undefined-variable-warnings
   ($make-thread-parameter #f (lambda (x) (and x #t))))
 
-(define $cpvalid)
 (let ()
   (import (nanopass))
   (include "base-lang.ss")
@@ -328,10 +327,10 @@
        (let-values ([(e* vals-dl?) (undefer* e* proxy dl?)])
          (defer-or-not (or body-dl? vals-dl?)
            `(letrec* ([,x* ,e*] ...) ,body)))]
-      [(foreign ,conv ,name ,[undefer : e dl?] (,arg-type* ...) ,result-type)
-       (defer-or-not dl? `(foreign ,conv ,name ,e (,arg-type* ...) ,result-type))]
-      [(fcallable ,conv ,[undefer : e dl?] (,arg-type* ...) ,result-type)
-       (defer-or-not dl? `(fcallable ,conv ,e (,arg-type* ...) ,result-type))]
+      [(foreign (,conv* ...) ,name ,[undefer : e dl?] (,arg-type* ...) ,result-type)
+       (defer-or-not dl? `(foreign (,conv* ...) ,name ,e (,arg-type* ...) ,result-type))]
+      [(fcallable (,conv* ...) ,[undefer : e dl?] (,arg-type* ...) ,result-type)
+       (defer-or-not dl? `(fcallable (,conv* ...) ,e (,arg-type* ...) ,result-type))]
       [(cte-optimization-loc ,box ,[undefer : e dl?])
        (defer-or-not dl? `(cte-optimization-loc ,box ,e))]
       [(pariah) (values x #f)]
@@ -547,10 +546,10 @@
        (defer-or-not (or dl0? dl1? dl2?) `(if ,e0 ,e1 ,e2))]
       [(seq ,[cpvalid : e1 dl1?] ,[cpvalid : e2 dl2?])
        (defer-or-not (or dl1? dl2?) `(seq ,e1 ,e2))]
-      [(foreign ,conv ,name ,[cpvalid : e dl?] (,arg-type* ...) ,result-type)
-       (defer-or-not dl? `(foreign ,conv ,name ,e (,arg-type* ...) ,result-type))]
-      [(fcallable ,conv ,[cpvalid : e dl?] (,arg-type* ...) ,result-type)
-       (defer-or-not dl? `(fcallable ,conv ,e (,arg-type* ...) ,result-type))]
+      [(foreign (,conv* ...) ,name ,[cpvalid : e dl?] (,arg-type* ...) ,result-type)
+       (defer-or-not dl? `(foreign (,conv* ...) ,name ,e (,arg-type* ...) ,result-type))]
+      [(fcallable (,conv* ...) ,[cpvalid : e dl?] (,arg-type* ...) ,result-type)
+       (defer-or-not dl? `(fcallable (,conv* ...) ,e (,arg-type* ...) ,result-type))]
       [(cte-optimization-loc ,box ,[cpvalid : e dl?])
        (defer-or-not dl? `(cte-optimization-loc ,box ,e))]
       [(pariah) (values x #f)]
@@ -562,3 +561,4 @@
   (set! $cpvalid
     (lambda (x)
       (if (= (optimize-level) 3) x (cpvalid x)))))
+)

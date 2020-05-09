@@ -6111,6 +6111,8 @@
           (lambda (r)
             (r #'a #'frip "extra stuff"))))
       a))
+  (error? ; not a compile-time value
+    (compile-time-value-value 17))
   (begin
     (with-output-to-file "testfile-mctv0.ss"
       (lambda ()
@@ -6132,6 +6134,7 @@
   (begin
     (import (testfile-mctv0))
     #t)
+  (compile-time-value? (make-compile-time-value 'fred))
   (begin
     (define-syntax frob (make-compile-time-value 'rabf))
     #t)
@@ -6180,6 +6183,7 @@
       (define-syntax x (make-compile-time-value 'xow)))
     #t)
   (eq? (let () (import (mctv l1)) (get-ctv x)) 'xow)
+  (eq? (compile-time-value-value (top-level-syntax 'x (environment '(mctv l1)))) 'xow)
   (begin
     (with-output-to-file "testfile-mctv1.ss"
       (lambda ()
@@ -6190,6 +6194,19 @@
     (for-each separate-compile '(mctv1))
     #t)
   (eq? (let () (import (testfile-mctv1)) (get-ctv x)) 'xuko1)
+  (compile-time-value? (top-level-syntax 'x (environment '(testfile-mctv1))))
+  (eq? (compile-time-value-value (top-level-syntax 'x (environment '(testfile-mctv1)))) 'xuko1)
+  (begin
+    (with-output-to-file "testfile-mctv1a.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-mctv1a) (export x) (import (chezscheme))
+             (define-syntax x (make-compile-time-value 'xuko1)))))
+      'replace)
+    (for-each separate-compile '(mctv1a))
+    #t)
+  (eq? (compile-time-value-value (top-level-syntax 'x (environment '(testfile-mctv1a)))) 'xuko1)
+  (eq? (let () (import (testfile-mctv1a)) (get-ctv x)) 'xuko1)
   (begin
     (with-output-to-file "testfile-mctv2.ss"
       (lambda ()
@@ -7976,6 +7993,19 @@
   (equal?
     (let () (import ($l3)) (f (f 3)))
     3)
+  (begin
+    ;; (export import-spec ...) empty case
+    (library ($empty) (export) (import (chezscheme)) (export (import)))
+    #t)
+  (begin
+    (library ($l4-A) (export a) (import (chezscheme)) (define a 1))
+    (library ($l4-B) (export b) (import (chezscheme)) (define b 2))
+    #t)
+  (equal? '(1 2) (let () (import ($l4-A) ($l4-B)) (list a b)))
+  (begin
+    ;; (export import-spec ...) multiple imports case
+    (library ($l4-C) (export) (import (chezscheme)) (export (import ($l4-A) ($l4-B))))
+    (equal? '(1 2) (let () (import ($l4-C)) (list a b))))
  )
 
 (mat library2
@@ -8457,7 +8487,7 @@
     "inside testfile-a3-9\n")
   (equal?
     (with-output-to-string (lambda () (load "testfile-a3-10.so")))
-    "outside (testfile-a3-8)\ninside testfile-a3-10\n")
+    "inside testfile-a3-10\n")
 )
 
 (mat library4
@@ -8715,6 +8745,468 @@
   (equal?
     (separate-eval '(revisit "testfile-l6-prog1.so"))
     "revisiting testfile-l6-prog1\n#((10 . 12))\n")
+)
+
+(mat library7
+  (begin
+    (mkfile "testfile-l7-a1.ss"
+      '(library (testfile-l7-a1) (export a-macro a) (import (chezscheme)) (define-syntax a-macro (identifier-syntax 'aaa)) (define (a x) (+ x (* x x)))))
+    (mkfile "testfile-l7-b1.ss"
+      '(library (testfile-l7-b1) (export b) (import (chezscheme) (testfile-l7-a1)) (define (b x) (cons 'b a-macro))))
+    (mkfile "testfile-l7-c1.ss"
+      '(library (testfile-l7-c1) (export c) (import (chezscheme) (testfile-l7-a1)) (define (c x) (cons 'c (a x)))))
+    (mkfile "testfile-l7-d1.ss"
+      '(library (testfile-l7-d1) (export d) (import (chezscheme) (testfile-l7-a1)) (define (d x) (list 'd a-macro (a x)))))
+    (separate-compile
+      '(lambda (x) (for-each compile-library x))
+      '(list "testfile-l7-a1" "testfile-l7-b1" "testfile-l7-c1" "testfile-l7-d1"))
+    #t)
+  (equal?
+    (separate-eval
+      '(let () (import (testfile-l7-b1)) (b 7))
+      '(let () (import (testfile-l7-c1)) (c 7))
+      '(let () (import (testfile-l7-d1)) (d 7)))
+    "(b . aaa)\n(c . 56)\n(d aaa 56)\n")
+  (begin
+    (separate-compile
+      '(lambda (x) (for-each compile-library x))
+      '(list "testfile-l7-a1" "testfile-l7-b1" "testfile-l7-c1"))
+    #t)
+  (equal?
+    (separate-eval
+      '(let () (import (testfile-l7-b1)) (b 7))
+      '(let () (import (testfile-l7-c1)) (c 7))
+      ; this should reload from source, since dependency is out-of-date
+      '(let () (import (testfile-l7-d1)) (d 7)))
+    "(b . aaa)\n(c . 56)\n(d aaa 56)\n")
+  (equal?
+    (separate-eval
+      ; this should reload from source, since dependency is out-of-date
+      '(let () (import (testfile-l7-d1)) (d 7))
+      '(let () (import (testfile-l7-c1)) (c 7))
+      '(let () (import (testfile-l7-b1)) (b 7)))
+    "(d aaa 56)\n(c . 56)\n(b . aaa)\n")
+  (error? ; expected different compilation instance
+    (separate-eval
+      '(let () (import (testfile-l7-b1)) (b 7))
+      '(let () (import (testfile-l7-c1)) (c 7))
+      '(load-library "testfile-l7-d1.so")
+      '(let () (import (testfile-l7-d1)) (d 7))))
+  (error? ; expected different compilation instance
+    (separate-eval
+      '(load-library "testfile-l7-d1.so")
+      '(let () (import (testfile-l7-d1)) (d 7))))
+  (equal?
+    (separate-eval
+      '(load-library "testfile-l7-b1.ss")
+      '(let () (import (testfile-l7-b1)) (b 7))
+      ; this should reload from source, since dependency is out-of-date
+      '(let () (import (testfile-l7-c1)) (c 7))
+      ; this should reload from source, since dependency is out-of-date
+      '(let () (import (testfile-l7-d1)) (d 7)))
+    "(b . aaa)\n(c . 56)\n(d aaa 56)\n")
+  (error? ; expected different compilation instance
+    (separate-eval
+      '(load-library "testfile-l7-b1.ss")
+      '(load-library "testfile-l7-c1.ss")
+      '(load-library "testfile-l7-d1.so")
+      '(let () (import (testfile-l7-d1)) (d 7))))
+  (begin
+    (delete-file "testfile-l7-a1.so")
+    #t)
+  (equal?
+    (separate-eval
+      '(parameterize ([compile-imported-libraries #t]) (compile-library "testfile-l7-b1.ss"))
+      '(let () (import (testfile-l7-b1)) (b 7))
+      ; this should reload from source, since dependency is out-of-date
+      '(let () (import (testfile-l7-c1)) (c 7))
+      '(let () (import (testfile-l7-d1)) (d 7)))
+    "compiling testfile-l7-b1.ss with output to testfile-l7-b1.so\ncompiling testfile-l7-a1.ss with output to testfile-l7-a1.so\n(b . aaa)\n(c . 56)\n(d aaa 56)\n")
+  (begin
+    (delete-file "testfile-l7-a1.so")
+    #t)
+  (error? ; expected different compilation instance
+    (separate-eval
+      '(parameterize ([compile-imported-libraries #t]) (compile-library "testfile-l7-b1.ss"))
+      '(load-library "testfile-l7-c1.so")
+      '(let () (import (testfile-l7-c1)) (c 7))))
+  (equal?
+    (separate-eval
+      '(library (testfile-l7-a1) (export a-macro a) (import (chezscheme)) (define-syntax a-macro (identifier-syntax 'aaa2)) (define (a x) (* x 11)))
+      '(let () (import (testfile-l7-b1)) (b 7))
+      '(let () (import (testfile-l7-c1)) (c 7))
+      '(let () (import (testfile-l7-d1)) (d 7)))
+    "(b . aaa2)\n(c . 77)\n(d aaa2 77)\n")
+  (error? ; expected different compilation instance
+    (separate-eval
+      '(library (testfile-l7-a1) (export a-macro a) (import (chezscheme)) (define-syntax a-macro (identifier-syntax 'aaa2)) (define (a x) (* x 11)))
+      '(let () (import (testfile-l7-b1)) (b 7))
+      '(let () (import (testfile-l7-c1)) (c 7))
+      '(load-library "testfile-l7-d1.so")
+      '(let () (import (testfile-l7-d1)) (d 7))))
+)
+
+(mat library-regression
+  ; test that failing invoke code does not result in cyclic dependency problem on re-run
+  (equal?
+    (separate-eval
+      '(begin
+         (library (invoke-fail)
+           (export x)
+           (import (chezscheme))
+           (define x #f)
+           (error #f "failed to load library (invoke-fail)"))
+         (guard (e [else
+                     (guard (e2 [else 
+                                  (display-condition e) (newline)
+                                  (display-condition e2) (newline)])
+                       (eval 'x (environment '(chezscheme) '(invoke-fail))))])
+           (eval 'x (environment '(chezscheme) '(invoke-fail))))))
+    "Exception: failed to load library (invoke-fail)\nException: failed to load library (invoke-fail)\n")
+
+  ; test that true cyclic dependency will always report the same thing
+  (equal?
+    (separate-eval
+      '(begin
+         (library (invoke-cyclic)
+           (export x y)
+           (import (chezscheme))
+           (define x #f)
+           (define y (eval '(if x 5 10) (environment '(chezscheme) '(invoke-cyclic)))))
+         (guard (e [else
+                     (guard (e2 [else 
+                                  (display-condition e) (newline)
+                                  (display-condition e2) (newline)])
+                       (eval 'x (environment '(chezscheme) '(invoke-cyclic))))])
+           (eval 'x  (environment '(chezscheme) '(invoke-cyclic))))))
+    "Exception: cyclic dependency involving invocation of library (invoke-cyclic)\nException: cyclic dependency involving invocation of library (invoke-cyclic)\n")
+
+  (begin
+    ; library to help make it easier to cause a failure in the visit-code that
+    ; does not lead to failure during compilation of the file.
+    (with-output-to-file "testfile-lr-l1.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-lr-l1)
+             (export make-it-fail)
+             (import (chezscheme))
+             (define make-it-fail (make-parameter #f (lambda (x) (and x #t)))))))
+      'replace)
+    ; simple test to define one macro and potentially to raise an error when
+    ; defining the second one.
+    (with-output-to-file "testfile-lr-l2.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-lr-l2)
+             (export M1 M2)
+             (import (chezscheme) (testfile-lr-l1))
+             (define-syntax M1
+               (identifier-syntax #f))
+
+             (define-syntax M2
+               (if (make-it-fail)
+                   (error 'M2 "user requested failure with (make-it-fail) parameter")
+                   (lambda (x)
+                     (syntax-case x ()
+                       [(_ expr) #'expr])))))))
+      'replace)
+    ; more complete test that attempts to create the various types of things
+    ; that can be defined in visit code so that we can verify things are being
+    ; properly reset.
+    (with-output-to-file "testfile-lr-l3.ss"
+      (lambda ()
+        (pretty-print
+          '(library (testfile-lr-l3)
+             (export a b c d e f g h)
+             (import (chezscheme) (testfile-lr-l1))
+
+             (module a (x) (define x 5))
+             (alias b cons)
+             (define-syntax c (make-compile-time-value 5))
+             (define d 5)
+             (meta define e 5)
+             (define-syntax f (identifier-syntax #f))
+             (define $g (make-parameter #f))
+             (define-syntax g
+               (make-variable-transformer
+                 (lambda (x)
+                   (syntax-case x ()
+                     [(set! _ v) #'($g v)]
+                     [_ #'($g)]
+                     [(_ e* ...) #'(($g) e* ...)]))))
+             (define-property f g 10)
+             (define-syntax h
+               (if (make-it-fail)
+                   (error 'h "user requested failure with (make-it-fail) parameter")
+                   (lambda (x)
+                     (syntax-case x ()
+                       [(_ expr) #'expr])))))))
+      'replace)
+    (separate-compile
+      '(lambda (x)
+         (parameterize ([compile-imported-libraries #t])
+           (for-each compile-library x)))
+      '(list "testfile-lr-l1" "testfile-lr-l2" "testfile-lr-l3"))
+    #t)
+
+  (equal?
+    (separate-eval
+      '(begin
+         (import (testfile-lr-l2) (testfile-lr-l1))
+         (make-it-fail #t)
+         (guard (e [else
+                     (guard (e2
+                              [else
+                                (display-condition e) (newline)
+                                (display-condition e2) (newline)])
+                       (eval 'M1 (environment '(testfile-lr-l2))))])
+           (eval 'M1 (environment '(testfile-lr-l2))))))
+    "Exception in M2: user requested failure with (make-it-fail) parameter\nException in M2: user requested failure with (make-it-fail) parameter\n")
+
+  ; module is defined as part of import code, run time bindings are setup as part of invoke code
+  (equal?
+    (separate-eval
+      '(begin
+         (import (testfile-lr-l3) (testfile-lr-l1))
+         (make-it-fail #t)
+         (import a)
+         x))
+    "5\n")
+
+  ; alias is part of module binding ribcage, set up by import code
+  (equal?
+    (separate-eval
+      '(begin
+         (import (testfile-lr-l3) (testfile-lr-l1))
+         (make-it-fail #t)
+         (b 'a 'b)))
+    "(a . b)\n")
+
+  ; compile-time-value is set in visit code, should show same error each time it is referenced
+  (equal?
+    (separate-eval
+      '(begin
+         (library (lookup)
+           (export lookup)
+           (import (chezscheme))
+           (define-syntax lookup
+             (lambda (x)
+               (syntax-case x ()
+                 [(_ id) (lambda (rho) #`'#,(rho #'id))]
+                 [(_ id key) (lambda (rho) #`'#,(rho #'id #'key))]))))
+         (import (testfile-lr-l3) (testfile-lr-l1))
+         (make-it-fail #t)
+         (guard (e [else
+                     (guard (e2
+                              [else
+                                (display-condition e) (newline)
+                                (display-condition e2) (newline)])
+                       (eval '(lookup c) (environment '(testfile-lr-l3) '(lookup))))])
+           (eval '(lookup c) (environment '(testfile-lr-l3) '(lookup))))))
+    "Exception in h: user requested failure with (make-it-fail) parameter\nException in h: user requested failure with (make-it-fail) parameter\n")
+
+  ; defines are set up as part of invoke code
+  (equal?
+    (separate-eval
+      '(begin
+         (import (testfile-lr-l3) (testfile-lr-l1))
+         (make-it-fail #t)
+         d))
+    "5\n")
+
+  ; meta defines are set up as part of visit code
+  (equal?
+    (separate-eval
+      '(begin
+         (import (testfile-lr-l3) (testfile-lr-l1))
+         (make-it-fail #t)
+         (guard (e [else
+                     (guard (e2
+                              [else
+                                (display-condition e) (newline)
+                                (display-condition e2) (newline)])
+                       (eval '(let ()
+                                (define-syntax get-e
+                                  (lambda (x)
+                                    (syntax-case x ()
+                                      [(_) #`'#,e])))
+                                (get-e))
+                         (environment '(chezscheme) '(testfile-lr-l3))))])
+           (eval '(let ()
+                    (define-syntax get-e
+                      (lambda (x)
+                        (syntax-case x ()
+                          [(_) #`'#,e])))
+                    (get-e))
+             (environment '(chezscheme) '(testfile-lr-l3))))))
+    "Exception in h: user requested failure with (make-it-fail) parameter\nException in h: user requested failure with (make-it-fail) parameter\n")
+
+  ; macros are set up as part of visit code
+  (equal?
+    (separate-eval
+      '(begin
+         (import (testfile-lr-l3) (testfile-lr-l1))
+         (make-it-fail #t)
+         (guard (e [else
+                     (guard (e2
+                              [else
+                                (display-condition e) (newline)
+                                (display-condition e2) (newline)])
+                       (eval 'f (environment '(testfile-lr-l3))))])
+           (eval 'f (environment '(testfile-lr-l3))))))
+    "Exception in h: user requested failure with (make-it-fail) parameter\nException in h: user requested failure with (make-it-fail) parameter\n")
+
+  ; variable transformer macros are set up as part of visit code
+  (equal?
+    (separate-eval
+      '(begin
+         (import (testfile-lr-l3) (testfile-lr-l1))
+         (make-it-fail #t)
+         (guard (e [else
+                     (guard (e2
+                              [else
+                                (display-condition e) (newline)
+                                (display-condition e2) (newline)])
+                       (eval 'g (environment '(testfile-lr-l3))))])
+           (eval 'g (environment '(testfile-lr-l3))))))
+    "Exception in h: user requested failure with (make-it-fail) parameter\nException in h: user requested failure with (make-it-fail) parameter\n")
+
+  ; properties are setup as part of visit code.
+  (equal?
+    (separate-eval
+      '(begin
+         (library (lookup)
+           (export lookup)
+           (import (chezscheme))
+           (define-syntax lookup
+             (lambda (x)
+               (syntax-case x ()
+                 [(_ id) (lambda (rho) #`'#,(rho #'id))]
+                 [(_ id key) (lambda (rho) #`'#,(rho #'id #'key))]))))
+         (import (testfile-lr-l3) (testfile-lr-l1))
+         (make-it-fail #t)
+         (guard (e [else
+                     (guard (e2
+                              [else
+                                (display-condition e) (newline)
+                                (display-condition e2) (newline)])
+                       (eval '(lookup f g) (environment '(testfile-lr-l3) '(lookup))))])
+           (eval '(lookup f g) (environment '(testfile-lr-l3) '(lookup))))))
+    "Exception in h: user requested failure with (make-it-fail) parameter\nException in h: user requested failure with (make-it-fail) parameter\n")
+
+  ;; re-arm import code if it complains about a library that is not visible
+  (begin
+    (with-output-to-file "testfile-lr-l4.ss"
+      (lambda ()
+        (pretty-print
+         '(library (testfile-lr-l4)
+            (export x)
+            (import (chezscheme))
+            (define x 123))))
+      'replace)
+    (with-output-to-file "testfile-lr-p4.ss"
+      (lambda ()
+        (for-each pretty-print
+         '((import (testfile-lr-l4) (scheme))
+           (define (run args)
+             (guard (c [#t (display-condition c) (newline)])
+               (pretty-print (top-level-value (car args) (environment (cdr args))))))
+           (when (> x 0) ;; reference export
+             (let ([args (map string->symbol (command-line-arguments))])
+               (if (= (length args) 2)
+                   (begin
+                     (run args)
+                     (run args))
+                   (error #f "expected 2 args")))))))
+      'replace)
+    (separate-eval
+     '(parameterize ([compile-imported-libraries #t] [generate-wpo-files #t])
+        (compile-program "testfile-lr-p4.ss")
+        (compile-whole-program "testfile-lr-p4.wpo" "testfile-lr-p4-visible" #t)
+        (compile-whole-program "testfile-lr-p4.wpo" "testfile-lr-p4-not-visible" #f)))
+    (equal?
+     (separate-eval
+      '(parameterize ([command-line-arguments '("x" "testfile-lr-l4")])
+         (load-program "testfile-lr-p4-visible")
+         (load-program "testfile-lr-p4-not-visible")))
+     (string-append
+      "123\n"
+      "123\n"
+      "Exception in environment: attempt to import invisible library (testfile-lr-l4)\n"
+      "Exception in environment: attempt to import invisible library (testfile-lr-l4)\n"))))
+
+(mat invoke-library
+  (error? ; invalid library reference
+     (invoke-library '(testfile-il1 (<= 3))))
+  (error? ; invalid library reference
+     (invoke-library '(testfile-il1 (what?))))
+  (error? ; invalid library reference
+     (invoke-library '()))
+  (error? ; invalid library reference
+     (invoke-library 'hello))
+  (error? ; invalid library reference
+     (invoke-library '(3 2 1)))
+  (begin
+    (mkfile "testfile-il1.ss"
+      '(library (testfile-il1 (2)) (export a) (import (chezscheme)) (define a 3) (printf "invoked (testfile-il1)\n")))
+    #t)
+  (equal?
+    (separate-eval
+      '(let () (import (testfile-il1)) a))
+    "invoked (testfile-il1)\n3\n")
+  (equal?
+    (separate-eval
+      '(invoke-library '(testfile-il1)))
+    "invoked (testfile-il1)\n")
+  (equal?
+    (separate-eval
+      '(invoke-library '(testfile-il1))
+      '(printf "hello\n")
+      '(let () (import (testfile-il1)) a))
+    "invoked (testfile-il1)\nhello\n3\n")
+  (equal?
+    (separate-eval
+      '(let () (import (testfile-il1)) a)
+      '(printf "hello\n")
+      '(invoke-library '(testfile-il1)))
+    "invoked (testfile-il1)\n3\nhello\n")
+  (begin
+    (separate-eval '(compile-library "testfile-il1"))
+    #t)
+  (delete-file "testfile-il1.ss")
+  (equal?
+    (separate-eval
+      '(let () (import (testfile-il1)) a))
+    "invoked (testfile-il1)\n3\n")
+  (equal?
+    (separate-eval
+      '(invoke-library '(testfile-il1)))
+    "invoked (testfile-il1)\n")
+  (equal?
+    (separate-eval
+      '(invoke-library '(testfile-il1))
+      '(printf "hello\n")
+      '(let () (import (testfile-il1)) a))
+    "invoked (testfile-il1)\nhello\n3\n")
+  (equal?
+    (separate-eval
+      '(let () (import (testfile-il1)) a)
+      '(printf "hello\n")
+      '(invoke-library '(testfile-il1)))
+    "invoked (testfile-il1)\n3\nhello\n")
+  (error? ; version mismatch
+    (separate-eval '(invoke-library '(testfile-il1 (3)))))
+  (error? ; version mismatch
+    (separate-eval
+      '(invoke-library '(testfile-il1 ((>= 3))))))
+  (equal?
+    (separate-eval
+      '(invoke-library '(testfile-il1 ((>= 2)))))
+    "invoked (testfile-il1)\n")
+  (equal?
+    (separate-eval
+      '(invoke-library '(testfile-il1 (2))))
+    "invoked (testfile-il1)\n")
 )
 
 (mat cross-library-optimization
@@ -9249,6 +9741,16 @@
 )
 
 (mat library-directories
+  (error? ; invalid argument
+    (library-directories '("a" . hello)))
+  (error? ; invalid argument
+    (library-directories '("a" . ("src" . "obj"))))
+  (error? ; invalid argument
+    (library-directories '("a" . (("src")))))
+  (error? ; invalid argument
+    (library-directories '("a" . (("src" "obj")))))
+  (error? ; invalid argument
+    (library-directories '("a" . ((("src" "obj"))))))
   (let ([x (library-directories)])
     (and (list? x)
          (andmap (lambda (x) (and (pair? x) (string? (car x)) (string? (cdr x)))) x)))
@@ -9288,6 +9790,14 @@
 )
 
 (mat library-extensions
+  (error? ; invalid argument
+    (library-extensions '.a1.sls))
+  (error? ; invalid argument
+    (library-extensions '((".foo"))))
+  (error? ; invalid argument
+    (library-extensions '((".foo" ".bar"))))
+  (error? ; invalid argument
+    (library-extensions '(((".junk")))))
   (let ([x (library-extensions)])
     (and (list? x)
          (andmap (lambda (x) (and (pair? x) (string? (car x)) (string? (cdr x)))) x)))
@@ -9308,6 +9818,144 @@
           (equal? (library-extensions) `(,@'((".a1.sls" . ".a1.so") (".boo" . ".booso") (".crud" . ".junk")) ,@default)))
         (parameterize ([library-extensions ".a1.sls:.boo::.booso:.crud::.junk:"])
           (equal? (library-extensions) `(,@'((".a1.sls" . ".a1.so") (".boo" . ".booso") (".crud" . ".junk")) ,@default)))))
+)
+
+(mat library-search-handler
+  (procedure? (library-search-handler))
+  (eq? (library-search-handler) default-library-search-handler)
+  (error? (default-library-search-handler "not-symbol" '(lib) '() '()))
+  (error? (default-library-search-handler 'import 'bad-library-name '() '()))
+  (error? (default-library-search-handler 'import '(lib) '(("invalid" "path" "list")) '()))
+  (error? (default-library-search-handler 'import '(lib) '(("foo" . "bar")) '(("bad") ("extensions"))))
+  (error?
+   (parameterize ([library-search-handler
+                   (lambda (who path dir* all-ext*)
+                     (values '(bad source path) #f #f))])
+     (eval '(import (foo)))))
+  (error?
+   (parameterize ([library-search-handler
+                   (lambda (who path dir* all-ext*)
+                     (values #f '(bad object path) #f))])
+     (eval '(import (foo)))))
+  (error?
+   (parameterize ([library-search-handler
+                   (lambda (who path dir* all-ext*)
+                     (values #f #f #t))])
+     (eval '(import (foo)))))
+  (begin
+    (mkdir "lsh-testdir")
+    (mkdir "lsh-testdir/src1")
+    (mkdir "lsh-testdir/src2")
+    (mkdir "lsh-testdir/obj")
+    #t)
+  (begin
+    (with-output-to-file "lsh-testdir/src1/lib.ss"
+      (lambda ()
+        (pretty-print
+         '(library (lib) (export a) (import (scheme))
+            (define a "src1 provided this a"))))
+      'replace)
+    (with-output-to-file "lsh-testdir/src2/lib.ss"
+      (lambda ()
+        (pretty-print
+         '(library (lib) (export a) (import (scheme))
+            (define a "a from src2"))))
+      'replace)
+    (with-output-to-file "lsh-testdir/src2/foo.ss"
+      (lambda ()
+        (pretty-print
+         '(library (foo) (export a) (import (scheme) (lib)))))
+      'replace)
+    (parameterize ([generate-wpo-files #t]
+                   [compile-imported-libraries #t]
+                   [library-directories '(("src2" . "obj"))])
+      (compile-file "lsh-testdir/src2/lib.ss" "lsh-testdir/obj/lib.so")
+      (compile-file "lsh-testdir/src2/foo.ss" "lsh-testdir/obj/foo.so"))
+    #t)
+  (equal?
+   "a from src2\n"
+   (separate-eval
+    '(cd "lsh-testdir")
+    '(library-extensions '((".ss" . ".so")))
+    '(library-directories '(("src2" . "obj") ("src1" . "obj")))
+    '(library-search-handler
+      (lambda (who path dir* all-ext*)
+        (let-values ([(src-path obj-path obj-exists?)
+                      (default-library-search-handler who path dir* all-ext*)])
+          (assert (equal? src-path "src2/lib.ss"))
+          (assert (equal? obj-path "obj/lib.so"))
+          (assert obj-exists?)
+          (values src-path obj-path obj-exists?))))
+    '(printf "~a\n" (let () (import (lib)) a))))
+  (equal?
+   "src1 provided this a\n"
+   (separate-eval
+    '(cd "lsh-testdir")
+    '(library-extensions '((".ss" . ".so")))
+    '(library-directories '(("src2" . "obj") ("src1" . "obj")))
+    '(library-search-handler
+      (lambda (who path dir* all-ext*)
+        (assert (eq? who 'import))
+        (assert (equal? path '(lib)))
+        (assert (equal? dir* (library-directories)))
+        (assert (equal? all-ext* (library-extensions)))
+        ;; switcheroo
+        (values "src1/lib.ss" #f #f)))
+    '(printf "~a\n" (let () (import (lib)) a))))
+  (equal?
+   (string-append
+    "compiling src1/lib.ss with output to obj/lib-compiled.so\n"
+    "src1 provided this a\n")
+   (separate-eval
+    '(cd "lsh-testdir")
+    '(compile-imported-libraries #t)
+    '(library-search-handler
+      (lambda (who path dir* all-ext*)
+        (values "src1/lib.ss" "obj/lib-compiled.so" #f)))
+    '(printf "~a\n" (let () (import (lib)) a))))
+  ;; the default library-search-handler finds obj/lib.wpo
+  ;; so no libraries are needed at run time
+  (equal?
+    "()\n"
+   (separate-eval
+    '(cd "lsh-testdir")
+    '(library-extensions '((".ss" . ".so")))
+    '(library-directories '(("src1" . "obj") ("src2" . "obj")))
+    '(compile-whole-library "obj/foo.wpo" "foo.library")))
+  (equal?
+   "((lib))\n"
+   (separate-eval
+    '(cd "lsh-testdir")
+    '(library-extensions '((".ss" . ".so")))
+    '(library-directories '(("src1" . "obj") ("src2" . "obj")))
+    '(define (check who path dir*)
+       (assert (eq? who 'compile-whole-library))
+       (assert (equal? path '(lib)))
+       (assert (equal? dir* (library-directories))))
+    '(library-search-handler
+      (lambda (who path dir* all-ext*)
+        (check who path dir*)
+        (assert (equal? all-ext* '((".ss" . ".wpo"))))
+        ;; default search finds the wpo file, but ...
+        (let-values ([(src-path obj-path obj-exists?)
+                      (default-library-search-handler who path dir* all-ext*)])
+          ;; user reordered library-directories since compiling the wpo file
+          (assert (equal? src-path "src1/lib.ss"))
+          (assert (equal? obj-path "obj/lib.wpo"))
+          (assert obj-exists?))
+        ;; ... we install a new handler that returns the object file instead
+        (library-search-handler
+         (lambda (who path dir* all-ext*)
+           (check who path dir*)
+           (assert (equal? all-ext* (library-extensions)))
+           (values #f "obj/lib.so" #t)))
+        ;; ... and report no .wpo file found so we fall back to the
+        ;; library-search-handler just installed
+        (values #f #f #f)))
+    '(compile-whole-library "obj/foo.wpo" "foo.library")))
+  (begin
+    (rm-rf "lsh-testdir")
+    #t)
 )
 
 (mat compile-imported-libraries
@@ -9924,7 +10572,7 @@
     (parameterize ([console-output-port (open-output-string)])
       (eval '(lambda () (import (testfile-imno2)) y))
       (get-output-string (console-output-port)))
-    "import: did not find source file \"testfile-imno2.chezscheme.sls\"\nimport: found source file \"testfile-imno2.ss\"\nimport: did not find corresponding object file \"testfile-imno2.so\"\nimport: loading source file \"testfile-imno2.ss\"\nimport: did not find source file \"testfile-imno1.chezscheme.sls\"\nimport: found source file \"testfile-imno1.ss\"\nimport: found corresponding object file \"testfile-imno1.so\"\nimport: object file is not older\nimport: loading object file \"testfile-imno1.so\"\n")
+    "import: did not find source file \"testfile-imno2.chezscheme.sls\"\nimport: found source file \"testfile-imno2.ss\"\nimport: did not find corresponding object file \"testfile-imno2.so\"\nimport: loading source file \"testfile-imno2.ss\"\nimport: did not find source file \"testfile-imno1.chezscheme.sls\"\nimport: found source file \"testfile-imno1.ss\"\nimport: found corresponding object file \"testfile-imno1.so\"\nimport: object file is not older\nimport: visiting object file \"testfile-imno1.so\"\nattempting to 'revisit' previously 'visited' \"testfile-imno1.so\" for library (testfile-imno1) run-time info\n")
   (eq? (import-notify #f) (void))
 )
 
@@ -10258,6 +10906,18 @@
          (remprop 'tlp-spam 'spam)
          (remprop 'tlp-spam 'tlp)
          #t))
+  ; make sure we ignore return value(s) of interleaved init expressions
+  (equal?
+   (with-output-to-string
+     (lambda ()
+       ; prevent cp0 from fixing the problem
+       (parameterize ([run-cp0 (lambda (f x) x)])
+         (eval '(top-level-program (import (scheme))
+                  (define (f) (printf "hello\n") (values 1 2 3))
+                  (f)
+                  (define x 'world)
+                  (pretty-print x))))))
+   "hello\nworld\n")
 )
 
 (mat library-meta
@@ -11093,18 +11753,22 @@
        (lambda ()
          (pretty-print (make-expr n)))
        'truncate)
-     (let ([start (current-time)])
-       (load "testfile.ss")
-       (let ([delta (time-difference (current-time) start)])
-         (+ (time-second delta)
-            (* 1e-9 (time-nanosecond delta))))))
+     (collect)
+     (parameterize ([collect-request-handler void])
+       (let ([start (current-time)])
+         (load "testfile.ss" expand)
+         (let ([delta (time-difference (current-time) start)])
+           (+ (* #e1e9 (time-second delta))
+              (time-nanosecond delta))))))
 
    (let loop ([tries 3])
      (when (zero? tries)
        (error 'source-cache-test "loading lots of `let-values` forms seems to take too long"))
-     (or (> (* 20 (time-expr 100))
-            (time-expr 1000))
-         (loop (sub1 tries)))))
+     (let ([t1000 (time-expr 1000)] [t10000 (time-expr 10000)])
+       (or (> (* 20 t1000) t10000)
+         (begin
+           (printf "t1000 = ~s, t10000 = ~s, t10000 / t1000 = ~s\n" t1000 t10000 (inexact (/ t10000 t1000)))
+           (loop (sub1 tries)))))))
 
   (begin
     (define sfd-to-cache

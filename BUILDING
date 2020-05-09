@@ -1,5 +1,5 @@
-Building Chez Scheme Version 9.4.1
-Copyright 1984-2017 Cisco Systems, Inc.
+Building Chez Scheme Version 9.5.3
+Copyright 1984-2019 Cisco Systems, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,8 +40,19 @@ Prerequisites:
 
 * GNU Make
 * gcc
-* Header files and libraries for ncurses
-* Header files and libraries for X windows
+* Header files and libraries for ncurses   [unless --disable-curses]
+* Header files and libraries for X windows [unless --disable-x11]
+* Header files and libraries for uuid
+
+Uninstalling on Unix-like systems is as simple as running:
+
+sudo make uninstall
+
+BUILDING VERSION 9.5 AND EARLIER
+
+If the environment variable CHEZSCHEMELIBDIRS is set, please unset
+it before running make.  Depending on the variable's value, it can
+cause the build process to fail.
 
 DETAILS
 
@@ -64,7 +75,7 @@ That's why the boot and header files are packaged with the sources.
 if successful, creates several files and directories:
 
 * The directory nanopass containing the Nanopass Infrastructure,
-  retrieved from github.
+  retrieved from GitHub.
 
 * A make file, Makefile, in the root (top level) directory.
 
@@ -75,8 +86,12 @@ if successful, creates several files and directories:
 
 * Within the workarea, the files Makefile, Mf-install, and Mf-boot.
 
-'./configure' supports various options, among which is --help, which
-can be used to list the supported options.
+'./configure' recognizes various options for controlling the type
+of build and the installation location.  For example, '--threads'
+requests a build with support for native threads, '--32' requests
+a 32-bit build, and '--installprefix <pathname>' specifies the
+installation root.  './configure --help' prints the supported
+options.
 
 The make file supports several targets:
 
@@ -91,9 +106,29 @@ The make file supports several targets:
   fails.  This should not fail unless the distributed boot files are
   out of sync with the sources.
 
-  To run Chez Scheme without installing, you need to tell the executable
-  where to find the boot files.  This can be done via command-line
-  arguments, e.g.:
+  When you make a modification to the system that causes the C side to
+  get out of sync with the Scheme side so that the build fails, try
+  the following from $W if you have a recent version of Chez Scheme
+  installed in your path:
+
+    make -C s clean all patchfile=patch Scheme=scheme SCHEMEHEAPDIRS={see below}
+    make build
+
+  Set SCHEMEHEAPDIRS to /usr/lib/csv%v/%m:/usr/local/lib/csv%v/%m on
+  Unix-like systems and to %x/../../boot/%m on Windows systems.
+
+  Alternatively, if you have a build before the changes at full path
+  <orig>, use
+
+    make from-orig ORIG=<orig>
+
+  To run Chez Scheme without installing, you need to tell the
+  executable where to find the boot files.  The run target of the
+  makefile will do that
+
+    make run
+
+  or this can be done manually via command-line arguments, e.g.:
 
     $W/bin/$M/scheme -b $W/boot/$M/petite.boot -b $W/boot/$M/scheme.boot
 
@@ -112,8 +147,11 @@ The make file supports several targets:
   is overridden via an argument to ./configure, $W is the same as $M.)
 
 'sudo make install'
-  runs the build plus installs the resulting executable, boot files,
+  runs the build plus installs the resulting executables, boot files,
   example files, and manual pages.
+
+'sudo make uninstall'
+  uninstalls the executables, boot files, example files, and manual pages.
 
 'make test'
   runs the build plus runs a set of test programs in various different
@@ -151,7 +189,7 @@ The make file supports several targets:
   can take 5 minutes or more.
 
   'make bootfiles' builds boot files for each machine type for which
-  a subdirectory exists in the top-level boot directory.  to build
+  a subdirectory exists in the top-level boot directory.  To build
   for a supported machine type that isn't built by default, simply
   add the appropriate subdirectory, i.e., 'mkdir boot/$M', where M
   is the machine type, before running 'make bootfiles'.  You can
@@ -165,22 +203,57 @@ The make file supports several targets:
 'make distclean'
   removes nanopass, Makefile, and all workareas.
 
+OTHER UNIX VARIANTS
+
+To build on Unix variants other than Linux and OS X, you will first
+need to build boot files on a Linux or OS X machine. On that machine,
+after building Chez Scheme, create boot files for the target machine
+<machine> with:
+
+ make boot XM=<machine>
+
+Copy the generated boot/<machine> directory to the target machine,
+adding to or replacing the boot directory with pre-built boot files
+there, and then build as on Linux.
+
+Remember to use gmake if make is not GNU make. If you run into linker
+trouble, try running configure with --libkernel so that the build
+avoids running ld directly.
+
+On OpenBSD, Chez Scheme must be built and installed on a filesystem
+that is mounted with wxallowed.
+
+On NetBSD, note that the makefiles run "paxctl +m" to enable WX pages
+(i.e., pages that have both write and execute enabled).
+
 WINDOWS
 
-Building Chez Scheme under Windows with Cygwin or Bash/WSL follows the
-instructions above, except that 'make install' is not supported, and
-the 'OS' environment variable must be set to 'Windows_NT' on Bash/WSL
-(to indicate a build for Windows, as opposed to a build for Linux on
-Windows):
+Building Chez Scheme under 64-bit Windows with Bash/WSL, MinGW/MSYS,
+or Cygwin follows the instructions above, except that 'make install'
+and 'make uninstall' are not supported. Alternatively, the main Chez
+Scheme executable can be built from the Windows command line or
+cross-compiled using MinGW as described further below.
+
+On Bash/WSL, the build directory must be in a location with a Windows
+path such as /mnt/c, and the 'OS' environment variable must be set to
+'Windows_NT' to indicate a build for Windows, as opposed to a build
+for Linux on Windows:
 
 env OS=Windows_NT ./configure
 env OS=Windows_NT make
 
 Prerequisites:
 
-* Cygwin or Bash/WSL with bash, grep, make, sed, etc.
-* Microsoft Visual Studio 2015
+* Bash/WSL, MinGW/MSYS, or Cygwin with bash, git, grep, make, sed, etc.
+* Microsoft Visual Studio 2019, 2017, or 2015
 * WiX Toolset (for making an install)
+
+Be sure that git config core.autocrlf is set to false.
+
+If you're using Visual Studio 2019, install "Desktop development with C++"
+on the "Workloads" tabs and the "C++ 2019 Redistributable MSMs" on the
+"Individual components" tab under the "Compilers, build tools, and runtimes"
+section.
 
 To run Chez Scheme or Petite Chez Scheme from a Windows command prompt,
 set PATH:
@@ -191,10 +264,10 @@ again with $W and $M replaced with the workarea name and machine
 type, and start Chez Scheme with the command "scheme" or Petite
 Chez with the command "petite".
 
-The executables are linked against the Microsoft Visual C++ run-time
-library vcruntime140.dll. If you distribute the executables to a
-different system, be sure to include the redistributable run-time
-library.
+The executables are dynamically linked against the Microsoft Visual
+C++ run-time library vcruntime140.dll. If you distribute the
+executables to a different system, be sure to include the
+redistributable run-time library.
 
 Making an Install for Windows
 
@@ -204,7 +277,7 @@ make
 
 This will create workareas and compile binaries for the a6nt, i3nt,
 ta6nt, and ti3nt configurations and then include them in a single
-Windows installer package Chez Scheme.msi. The package also includes
+Windows installer package Chez Scheme.exe. The package also includes
 example files and the redistributable Microsoft Visual C++ run-time
 libraries.
 
@@ -219,7 +292,7 @@ http://gnuwin32.sourceforge.net/packages/libiconv.htm
 
 An alternative that uses the Windows API can be found at:
 
-https://github.com/win-iconv/win-iconv
+https://github.com/burgerrg/win-iconv/releases
 
 If the DLL is not present, the iconv tests will fail.  No other tests
 should be affected.
@@ -230,3 +303,36 @@ Library.
 
 Use 'make test' described above to run the tests.
 
+WINDOWS EXECUTABLE VIA COMMAND PROMPT
+
+To build the Chez Scheme executable using Microsoft Visual Studio,
+first set up command-line tools. The c\vs.bat script can help if you
+supply amd64 for a 64-bit build or x86 for a 32-bit build:
+
+ c\vs.bat amd64
+
+Then, run c\build/bat with a machine name, either ta6nt (64-bit
+threaded), a6nt (64-bit non-threaded), ti3nt (32-bit threaded), or
+i3nt (32-bit non-threaded):
+
+ c\build.bat ta6nt
+
+The resulting executable in <machine>\bin\<machine> relies on
+bootfiles in ..\boot\<machine> relative to the executable.
+
+CROSS-COMPILING THE WINDOWS EXECUTABLE
+
+To cross-compile the main Chez Scheme executable for Windows using
+MinGW, specify suitable build tools to configure, perhaps using
+--toolprefix= like this:
+
+ ./configure -m=ta6nt --threads --toolprefix=x86_64-w64-mingw32-
+
+Then, make with c/Mf-<machine> while supplying cross=t and o=o,
+possibly like this:
+
+ (cd ta6nt/c && make -f Mf-ta6nt cross=t o=o)
+
+The executable is written to <machine>/bin/<machine>, and it should be
+installed with bootfiles in ../boot/<machine>/ relative to the
+executable.

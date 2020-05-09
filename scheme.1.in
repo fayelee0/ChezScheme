@@ -3,7 +3,7 @@
 .if t .ds c caf\o'\'e'
 .if n .ds c cafe
 .ds ]W 
-.TH SCHEME 1 "April 2017 Cisco Systems, Inc."
+.TH SCHEME 1 "Chez Scheme Version 9.5.3 September 2019"
 .SH NAME
 \fIChez Scheme\fP
 .br
@@ -14,7 +14,7 @@
 \fB{InstallPetiteName}\fP [ \fIoptions\fP ] \fIfile\fP ...
 .SH DESCRIPTION
 \*s is a programming language, based on R6RS Scheme, and a
-high-performance implementation of that langauge.
+high-performance implementation of that language.
 \*s compiles source expressions \fIincrementally\fP to machine code,
 providing the speed of compiled code in an interactive system.
 .LP
@@ -72,8 +72,11 @@ Disables the expression editor.
 .B --eehistory off | \fIfile\fP
 Set expression-editor history file or disable restore and save of history.
 .TP
-.B ---enable-object-counts
+.B --enable-object-counts
 Have collector maintain object counts.
+.TP
+.B --retain-static-relocation
+Keep reloc information for compute-size, etc.
 .TP
 .B -b \fIfile\fP, --boot \fIfile\fP
 Load boot code from \fIfile\fP.
@@ -791,6 +794,6 @@ Second Edition\fP,
 MIT press (1996).
 .in -5
 .SH AUTHOR
-Copyright 2017 Cisco Systems, Inc.
+Copyright 2019 Cisco Systems, Inc.
 Licensed under the Apache License, Version 2.0
 (http://www.apache.org/licenses/LICENSE-2.0)

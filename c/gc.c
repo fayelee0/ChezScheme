@@ -916,6 +916,17 @@ void GCENTRY(ptr tc, IGEN mcg, IGEN tg) {
                 ptr old_end, new_end;
 
                 rep = GUARDIANREP(ls);
+              /* ftype_guardian_rep is a marker for reference-counted ftype pointer */
+                if (rep == ftype_guardian_rep) {
+                  int b; uptr *addr;
+                  rep = GUARDIANOBJ(ls);
+                  if (FWDMARKER(rep) == forward_marker) rep = FWDADDRESS(rep);
+                /* Caution: Building in assumption about shape of an ftype pointer */
+                  addr = RECORDINSTIT(rep, 0);
+                  LOCKED_DECR(addr, b);
+                  if (!b) continue;
+                }
+
                 relocate(&rep);
 
               /* if tconc was old it's been forwarded */
@@ -923,7 +934,7 @@ void GCENTRY(ptr tc, IGEN mcg, IGEN tg) {
 
                 old_end = Scdr(tconc);
                 /* allocating pair in tg means it will be swept, which is wasted effort, but should cause no harm */
-                new_end = S_cons_in(space_impure, tg, FIX(0), FIX(0));
+                new_end = S_cons_in(space_impure, 0, FIX(0), FIX(0));
 #ifdef ENABLE_OBJECT_COUNTS
                 S_G.countof[tg][countof_pair] += 1;
 #endif /* ENABLE_OBJECT_COUNTS */
@@ -1168,7 +1179,7 @@ void GCENTRY(ptr tc, IGEN mcg, IGEN tg) {
         si->next = chunk->unused_segs;
         chunk->unused_segs = si;
 #ifdef WIPECLEAN
-        memset((void *)build_ptr(seg,0), 0xc7, bytes_per_segment);
+        memset((void *)build_ptr(si->number,0), 0xc7, bytes_per_segment);
 #endif
         if ((chunk->nused_segs -= 1) == 0) {
           if (chunk->bytes != (minimum_segment_request + 1) * bytes_per_segment) {
@@ -1233,6 +1244,9 @@ void GCENTRY(ptr tc, IGEN mcg, IGEN tg) {
     }
 
     S_resize_oblist();
+
+    /* tell profile_release_counters to look for bwp'd counters at least through tg */
+    if (S_G.prcgeneration < tg) S_G.prcgeneration = tg;
 }
 
 #define sweep_space(s, body)\
@@ -1471,15 +1485,12 @@ static void sweep_thread(p) ptr p; {
     relocate(&WINDERS(tc))
     relocate_return_addr(&FRAME(tc,0))
     sweep_stack((uptr)SCHEMESTACK(tc), (uptr)SFP(tc), (uptr)FRAME(tc,0));
-    relocate(&U(tc))
-    relocate(&V(tc))
-    relocate(&W(tc))
-    relocate(&X(tc))
-    relocate(&Y(tc))
+    U(tc) = V(tc) = W(tc) = X(tc) = Y(tc) = 0;
     /* immediate SOMETHINGPENDING(tc) */
     /* immediate TIMERTICKS */
     /* immediate DISABLE_COUNT */
     /* immediate SIGNALINTERRUPTPENDING */
+    /* void* SIGNALINTERRUPTQUEUE(tc) */
     /* immediate KEYBOARDINTERRUPTPENDING */
     relocate(&THREADNO(tc))
     relocate(&CURRENTINPUT(tc))
@@ -1500,12 +1511,20 @@ static void sweep_thread(p) ptr p; {
     /* immediate GENERATEINSPECTORINFORMATION */
     /* immediate GENERATEPROFILEFORMS */
     /* immediate OPTIMIZELEVEL */
-    relocate(&PARAMETERS(tc))
+    relocate(&SUBSETMODE(tc))
+    /* immediate SUPPRESSPRIMITIVEINLINING */
+    relocate(&DEFAULTRECORDEQUALPROCEDURE(tc))
+    relocate(&DEFAULTRECORDHASHPROCEDURE(tc))
+    relocate(&COMPRESSFORMAT(tc))
+    relocate(&COMPRESSLEVEL(tc))
+    /* void* LZ4OUTBUFFER(tc) */
     /* U64 INSTRCOUNTER(tc) */
     /* U64 ALLOCCOUNTER(tc) */
+    relocate(&PARAMETERS(tc))
     for (i = 0 ; i < virtual_register_count ; i += 1) {
       relocate(&VIRTREG(tc, i));
     }
+    DSTBV(tc) = SRCBV(tc) = Sfalse;
   }
 }
 
@@ -1696,7 +1715,7 @@ static void sweep_code_object(tc, co) ptr tc, co; {
         S_set_code_obj("gc", RELOC_TYPE(entry), co, a, obj, item_off);
     }
 
-    if (target_generation == static_generation && !S_G.retain_static_relocation) {
+    if (target_generation == static_generation && !S_G.retain_static_relocation && (CODETYPE(co) & (code_flag_template << code_flags_offset)) == 0) {
       CODERELOC(co) = (ptr)0;
     } else {
       /* Don't copy non-oldspace relocation tables, since we may be
@@ -2126,7 +2145,7 @@ static int check_dirty_ephemeron(ptr pe, int tg, int youngest) {
         youngest = tg;
       } else {
         /* Not reached, so far; add to pending list */
-	add_ephemeron_to_pending(pe);
+        add_ephemeron_to_pending(pe);
         /* Make the consistent (but pessimistic w.r.t. to wrong-way
            pointers) assumption that the key will stay live and move
            to the target generation. That assumption covers the value

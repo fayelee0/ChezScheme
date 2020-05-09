@@ -150,14 +150,6 @@ ptr S_compute_bytes_allocated(xg, xs) ptr xg; ptr xs; {
   return Sunsigned(n);
 }
 
-ptr S_thread_get_more_room(t, n) iptr t; iptr n; {
-   ptr x;
-   tc_mutex_acquire()
-   find_room(space_new, 0, t, n, x);
-   tc_mutex_release()
-   return x;
-}
-
 static void maybe_fire_collector() {
   ISPC s;
   uptr bytes, fudge;
@@ -369,24 +361,29 @@ void S_scan_remembered_set() {
 
 void S_get_more_room() {
   ptr tc = get_thread_context();
-  ptr xp; uptr ap, eap, real_eap, type, size;
-
-  tc_mutex_acquire()
-
-  ap = (uptr)AP(tc);
-  eap = (uptr)EAP(tc);
-  real_eap = (uptr)REAL_EAP(tc);
+  ptr xp; uptr ap, type, size;
 
   xp = XP(tc);
   if ((type = TYPEBITS(xp)) == 0) type = typemod;
-  size = ap - (iptr)UNTYPE(xp,type);
-  ap -= size;
+  ap = (uptr)UNTYPE(xp, type);
+  size = (uptr)((iptr)AP(tc) - (iptr)ap);
+
+  XP(tc) = S_get_more_room_help(tc, ap, type, size);
+}
+
+ptr S_get_more_room_help(ptr tc, uptr ap, uptr type, uptr size) {
+  ptr x; uptr eap, real_eap;
+
+  eap = (uptr)EAP(tc);
+  real_eap = (uptr)REAL_EAP(tc);
+
+  tc_mutex_acquire()
 
   S_scan_dirty((ptr **)eap, (ptr **)real_eap);
   eap = real_eap;
 
   if (eap - ap >= size) {
-    XP(tc) = TYPE(ap, type);
+    x = TYPE(ap, type);
     ap += size;
     if (eap - ap > alloc_waste_maximum) {
       AP(tc) = (ptr)ap;
@@ -398,20 +395,22 @@ void S_get_more_room() {
   } else if (eap - ap > alloc_waste_maximum) {
     AP(tc) = (ptr)ap;
     EAP(tc) = (ptr)eap;
-    find_room(space_new, 0, type, size, XP(tc));
+    find_room(space_new, 0, type, size, x);
   } else {
     S_G.bytes_of_space[space_new][0] -= eap - ap;
     S_reset_allocation_pointer(tc);
     ap = (uptr)AP(tc);
     if (size + alloc_waste_maximum <= (uptr)EAP(tc) - ap) {
-      XP(tc) = TYPE(ap, type);
+      x = TYPE(ap, type);
       AP(tc) = (ptr)(ap + size);
     } else {
-      find_room(space_new, 0, type, size, XP(tc));
+      find_room(space_new, 0, type, size, x);
     }
   }
 
   tc_mutex_release()
+
+  return x;
 }
 
 /* S_cons_in is always called with mutex */
@@ -657,64 +656,6 @@ ptr S_exactnum(a, b) ptr a, b; {
     return p;
 }
 
-ptr S_ifile(icount, name, fd, info, flags, ilast, ibuf)
-        iptr flags, icount; char *ilast; iptr fd; ptr name, ibuf, info; {
-    ptr tc = get_thread_context();
-    ptr p;
-
-    thread_find_room(tc, type_typed_object, size_port, p);
-    PORTTYPE(p) = flags | type_port;
-    PORTNAME(p) = name;
-  /* PORTHANDLER is really a ptr only when PORTTYPE & PORT_FLAG_PROC_HANDLER is true */
-    PORTHANDLER(p) = (ptr)fd;
-    PORTINFO(p) = info;
-    PORTICNT(p) = icount;
-    PORTILAST(p) = (ptr)ilast;
-    PORTIBUF(p) = ibuf;
-  /* leave output buffer and last uninitialized for input only ports */
-    PORTOCNT(p) = 0;
-    return p;
-}
-
-ptr S_ofile(ocount, name, fd, info, flags, olast, obuf)
-        iptr flags, ocount; char *olast; iptr fd; ptr name, obuf, info; {
-    ptr tc = get_thread_context();
-    ptr p;
-
-    thread_find_room(tc, type_typed_object, size_port, p);
-    PORTTYPE(p) = flags | type_port;
-    PORTNAME(p) = name;
-  /* PORTHANDLER is really a ptr only when PORTTYPE & PORT_FLAG_PROC_HANDLER is true */
-    PORTHANDLER(p) = (ptr)fd;
-    PORTINFO(p) = info;
-    PORTOCNT(p) = ocount;
-    PORTOLAST(p) = (ptr)olast;
-    PORTOBUF(p) = obuf;
-  /* leave input buffer and last uninitialized for output only ports */
-    PORTICNT(p) = 0;
-    return p;
-}
-
-ptr S_iofile(icount, ocount, name, fd, info, flags, ilast, ibuf, olast, obuf)
-        iptr flags, icount, ocount; char *ilast, *olast; iptr fd; ptr name, ibuf, obuf, info; {
-    ptr tc = get_thread_context();
-    ptr p;
-
-    thread_find_room(tc, type_typed_object, size_port, p);
-    PORTTYPE(p) = flags | type_port;
-    PORTNAME(p) = name;
-  /* PORTHANDLER is really a ptr only when PORTTYPE & PORT_FLAG_PROC_HANDLER is true */
-    PORTHANDLER(p) = (ptr)fd;
-    PORTINFO(p) = info;
-    PORTICNT(p) = icount;
-    PORTILAST(p) = (ptr)ilast;
-    PORTIBUF(p) = ibuf;
-    PORTOCNT(p) = ocount;
-    PORTOLAST(p) = (ptr)olast;
-    PORTOBUF(p) = obuf;
-    return p;
-}
-
 /* S_string returns a new string of length n.  If s is not NULL, it is
  * copied into the new string.  If n < 0, then s must be non-NULL,
  * and the length of s (by strlen) determines the length of the string */
@@ -756,8 +697,126 @@ ptr S_string(s, n) const char *s; iptr n; {
     return p;
 }
 
-ptr S_bignum(n, sign) iptr n; IBOOL sign; {
-    ptr tc = get_thread_context();
+ptr Sstring_utf8(s, n) const char *s; iptr n; {
+  const char* u8;
+  iptr cc, d, i, n8;
+  ptr p, tc;
+
+  if (n < 0) n = strlen(s);
+
+  if (n == 0) return S_G.null_string;
+
+  /* determine code point count cc */
+  u8 = s;
+  n8 = n;
+  cc = 0;
+  while (n8 > 0) {
+    unsigned char b1 = *(const unsigned char*)u8++;
+    n8--;
+    cc++;
+    if ((b1 & 0x80) == 0)
+      ;
+    else if ((b1 & 0x40) == 0)
+      ;
+    else if ((b1 & 0x20) == 0) {
+      if ((n8 >= 1) && ((*u8 & 0xc0) == 0x80)) {
+        u8++;
+        n8--;
+      }
+    } else if ((b1 & 0x10) == 0) {
+      if ((n8 >= 1) && ((*u8 & 0xc0) == 0x80)) {
+        u8++;
+        n8--;
+        if ((n8 >= 1) && ((*u8 & 0xc0) == 0x80)) {
+          u8++;
+          n8--;
+        }
+      }
+    } else if ((b1 & 0x08) == 0) {
+      if ((n8 >= 1) && ((*u8 & 0xc0) == 0x80)) {
+        u8++;
+        n8--;
+        if ((n8 >= 1) && ((*u8 & 0xc0) == 0x80)) {
+          u8++;
+          n8--;
+          if ((n8 >= 1) && ((*u8 & 0xc0) == 0x80)) {
+            u8++;
+            n8--;
+          }
+        }
+      }
+    }
+  }
+
+  if ((uptr)cc > (uptr)maximum_string_length)
+    S_error("", "invalid string size request");
+
+  tc = get_thread_context();
+  d = size_string(cc);
+  thread_find_room(tc, type_typed_object, d, p);
+  STRTYPE(p) = (cc << string_length_offset) | type_string;
+
+  /* fill the string */
+  u8 = s;
+  n8 = n;
+  i = 0;
+  while (n8 > 0) {
+    unsigned char b1 = *u8++;
+    int c = 0xfffd;
+    n8--;
+    if ((b1 & 0x80) == 0)
+      c = b1;
+    else if ((b1 & 0x40) == 0)
+      ;
+    else if ((b1 & 0x20) == 0) {
+      unsigned char b2;
+      if ((n8 >= 1) && (((b2 = *u8) & 0xc0) == 0x80)) {
+        int x = ((b1 & 0x1f) << 6) | (b2 & 0x3f);
+        u8++;
+        n8--;
+        if (x >= 0x80)
+          c = x;
+      }
+    } else if ((b1 & 0x10) == 0) {
+      unsigned char b2;
+      if ((n8 >= 1) && (((b2 = *u8) & 0xc0) == 0x80)) {
+        unsigned char b3;
+        u8++;
+        n8--;
+        if ((n8 >= 1) && (((b3 = *u8) & 0xc0) == 0x80)) {
+          int x = ((b1 & 0x0f) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f);
+          u8++;
+          n8--;
+          if ((x >= 0x800) && ((x < 0xd800) || (x > 0xdfff)))
+            c = x;
+        }
+      }
+    } else if ((b1 & 0x08) == 0) {
+      unsigned char b2;
+      if ((n8 >= 1) && (((b2 = *u8) & 0xc0) == 0x80)) {
+        unsigned char b3;
+        u8++;
+        n8--;
+        if ((n8 >= 1) && (((b3 = *u8) & 0xc0) == 0x80)) {
+          unsigned char b4;
+          u8++;
+          n8--;
+          if ((n8 >= 1) && (((b4 = *u8) & 0xc0) == 0x80)) {
+            int x = ((b1 & 0x07) << 18) | ((b2 & 0x3f) << 12) | ((b3 & 0x3f) << 6) | (b4 & 0x3f);
+            u8++;
+            n8--;
+            if ((x >= 0x10000) && (x <= 0x10ffff))
+              c = x;
+          }
+        }
+      }
+    }
+    Sstring_set(p, i++, c);
+  }
+  return p;
+}
+
+ptr S_bignum(tc, n, sign) ptr tc; iptr n; IBOOL sign; {
     ptr p; iptr d;
 
     if ((uptr)n > (uptr)maximum_bignum_length)
@@ -792,4 +851,12 @@ ptr S_relocation_table(n) iptr n; {
     thread_find_room(tc, typemod, d, p);
     RELOCSIZE(p) = n;
     return p;
+}
+
+ptr S_weak_cons(ptr car, ptr cdr) {
+  ptr p;
+  tc_mutex_acquire();
+  p = S_cons_in(space_weakpair, 0, car, cdr);
+  tc_mutex_release();
+  return p;
 }

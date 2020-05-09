@@ -1,4 +1,4 @@
-% Copyright 2005-2017 Cisco Systems, Inc.
+% Copyright 2005-2018 Cisco Systems, Inc.
 % 
 % Licensed under the Apache License, Version 2.0 (the "License");
 % you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ After entering this command, you should see a short greeting followed
 by an angle-bracket on a line by itself, like this:
 
 \schemedisplay
-Chez Scheme Version 9.4
+Chez Scheme Version 9.5.1
 Copyright 1984-2017 Cisco Systems, Inc. 
 
 > 
@@ -687,7 +687,7 @@ been defined,
 (define yin (lambda () (- (yang) 1)))
 \endschemedisplay
 
-defines \scheme{yin} at top level as a variable to a procedure that calls
+defines \scheme{yin} at top level as a variable bound to a procedure that calls
 the value of the top-level variable \scheme{yang}, even though \scheme{yang}
 has not yet been defined.
 If this is followed by
@@ -1011,11 +1011,9 @@ command.
 \endschemedisplay
 
 Scripts may be compiled using \index{\scheme{compile-script}}\scheme{compile-script}, which is like
-\scheme{compile-file} but differs in two ways:
-(1) it copies the leading \scheme{#!} line from the source-file script
-into the object file, and (2) when the \scheme{#!} line is present,
-it disables the default compression of the resulting file, which would
-otherwise prevent it from being recognized as a script file.
+\scheme{compile-file} but differs in that it
+copies the leading \scheme{#!} line from the source-file script
+into the object file.
 
 If {\PetiteChezScheme} is installed, but not {\ChezScheme},
 \scheme{/usr/bin/scheme} may be
@@ -1538,9 +1536,8 @@ libraries have been built and Scheme source files have been compiled
 to object code.
 
 Although not strictly necessary, we suggest that you concatenate your
-object files, if you have more than one, into a single object file.
-This may be done on Unix systems simply via the \scheme{cat}
-program or on Windows via \scheme{copy}.
+object files, if you have more than one, into a single object file
+via the \scheme{concatenate-object-files} procedure.
 Placing all of the object code into a single file
 simplifies both building and distribution of applications.
 
@@ -1590,8 +1587,19 @@ application's name and spare your users from supplying any command-line
 arguments or running a separate script to load the application code.
 \end{itemize}
 
-A boot file is simply an object file, possibly containing the code for
-more than one source file, prefixed by a boot header.
+\index{\scheme{scheme-start}}%
+When an application is packaged into a boot file, the source code
+that is compiled and converted into a boot file should set
+\scheme{scheme-start} to a procedure that starts the application,
+as shown in the example above.
+The application should not be started directly from the boot file,
+because boot files are loaded before final initialization of the
+Scheme system.
+The value of \scheme{scheme-start} is invoked automatically after
+final initialization.
+
+A boot file is simply an object file containing the code for
+one or more source files, prefixed by a boot header.
 The boot header identifies a base boot file upon which the application
 directly depends, or possibly two or more alternatives upon which the
 application can be run.
@@ -1630,7 +1638,7 @@ This would allow your application to run on top of the full
 {\ChezScheme} if present, otherwise {\PetiteChezScheme}.
 
 In most cases, you can construct your application
-so it does not depend upon features of {\ChezScheme} (specifically,
+so it does not depend upon features of scheme.boot (specifically,
 the compiler) by specifying only \scheme{"petite"} in the call to
 \scheme{make-boot-file}.
 If your application calls \scheme{eval}, however, and you wish to
@@ -1638,6 +1646,28 @@ allow users to be able to take
 advantage of the faster execution speed of compiled code, then specifying
 both \scheme{"scheme"} and \scheme{"petite"}
 is appropriate.
+
+Here is how we might create and run a simple ``echo'' application
+from a Linux shell:
+
+\schemedisplay
+echo '(suppress-greeting #t)' > myecho.ss
+echo '(scheme-start (lambda fns (printf "~{~a~^ ~}\n" fns)))' >> myecho.ss
+echo '(compile-file "myecho.ss") \
+      (make-boot-file "myecho.boot" (quote ("petite")) "myecho.so")' \
+     | scheme -q
+scheme -b myecho.boot hello world
+\endschemedisplay
+
+If we take the extra step of installing a copy of the {\PetiteChezScheme}
+executable as \scheme{myecho} and copying \scheme{myecho.boot} into
+the same directory as \scheme{petite.boot} (or set SCHEMEHEAPDIRS to
+include the directory containing myecho.boot), we can simply invoke
+\scheme{myecho} to run our echo application:
+
+\schemedisplay
+myecho hello world
+\endschemedisplay
 
 \parheader{Distributing the Application}
 Distributing an application involves can be as simple as creating a
@@ -1655,7 +1685,7 @@ The application installation script should install {\PetiteChezScheme}
 if not already installed on the target system.
 It should install the application boot file in the same directory as
 the {\PetiteChezScheme} boot file petite.boot is installed,
-and it should should install the application shared libraries, if any,
+and it should install the application shared libraries, if any,
 either in the same location or in a standard location for shared libraries
 on the target system.
 It should also create a link to or copy of the {\PetiteChezScheme}
@@ -1757,7 +1787,7 @@ parameter (Section~\ref{SECTUSEINTERACTION}).
 
 Most of the options are described elsewhere in this chapter, and a few
 are self-explanatory.
-The remainder pertain the loading of boot files at system start-up
+The remainder pertain to the loading of boot files at system start-up
 time and are described below.
 
 \index{boot files}%

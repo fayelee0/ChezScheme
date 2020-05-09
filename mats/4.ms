@@ -370,6 +370,8 @@
  )
 
 (mat cond
+  (error? ; invalid syntax
+    (cond))
    (let ((a 'a))
       (and (begin (set! a 3)
                   (cond ((= a 4) #f) ((= a 3) #t) (else #f)))
@@ -395,6 +397,8 @@
 (mat exclusive-cond
    (error? ; invalid syntax
      (exclusive-cond [a . b]))
+   (error? ; invalid syntax
+     (exclusive-cond))
    (let ((a 'a))
       (and (begin (set! a 3)
                   (exclusive-cond ((= a 4) #f) ((= a 3) #t) (else #f)))
@@ -448,7 +452,7 @@
          ; make sure no collection occurs before profile data is dumped
          (parameterize ([compile-profile #t] [collect-request-handler void])
            (load "testfile.ss" compile)
-           (profile-dump-data "testfile.pd"))
+           (profile-dump-data "testfile.pd" (remp preexisting-profile-dump-entry? (profile-dump))))
          ; make sure collections are restarted
          (collect)))
      "(11 10 1 10 0)\n")
@@ -463,168 +467,299 @@
    (begin
      (profile-clear-database)
      #t)
- )
-
-(mat case
-   (error? ; invalid syntax
-     (case 3 [a . b]))
-   (eq? (case 'a [a 'yes] [b 'no]) 'yes)
-   (let ((a 'a))
-      (and
-        (begin (set! a 'a)
-               (case a (a #t) ((b c) #f))
-               (case a (a #t) ((b c) #f) (else #f)))
-        (begin (set! a 'b)
-               (case a (a #f) ((b c) #t))
-               (case a (a #f) ((b c) #t) (else #f)))
-        (begin (set! a 'c)
-               (case a (a #f) ((b c) #t))
-               (case a (a #f) ((b c) #t) (else #f)))
-        (begin (set! a 'd)
-               (case a (a #f) ((b c) #f) (else #t)))))
-    (let ([f (lambda (x)
-                (case x
-                   (#\a 'case1)
-                   (1/2 'case2)
-                   (999999999999999 'case3)
-                   (3.4 'case4)
-                   (else 'oops)))])
-       (and (eq? (f (string-ref "abc" 0)) 'case1)
-            (eq? (f (exact 0.5)) 'case2)
-            (eq? (f (- 1000000000000000 1)) 'case3)
-            (eq? (f (+ 3.0 4/10)) 'case4)
-            (eq? (f 'b) 'oops)))
-    (case '() [() #f] [else #t])
-    (case '() [(()) #t] [else #f])
-    (case "meow" ["meow" #t] [else #f])
-    (case '(1 2 3) [((1 2 3) (3 2 1)) #t] [else #f])
-    (case 'a [1 6] ["meow" #f] [(a b c) #t])
-    (case #\: [1 6] ["meow" #f] [(a b c) #f] [(#\; #\9 #\: #\4) #t])
-    (case (/ 12.0 3.0) [(4 5 6) #f] [("bla") #f] [(a b c) #f] [(1 5.8 4.9 4.0) #t] [else #f])
    (begin
-     (with-output-to-file "testfile.ss"
-       (lambda ()
-         (pretty-print
-           '(define foo
-              (lambda (x)
-                (case x
-                  [("three" 4) 'B]
-                  [("three" 5) 'A]
-                  [else #f]))))
-         (pretty-print
-           '(begin
-              (do ([i 10 (fx- i 1)]) ((fx= i 0)) (write (foo 5)))
-              (write (foo "three")))))
-       'replace)
-     (profile-clear-database)
-     #t)
-   ; verify no reordering w/no profile information
-   (let ([x (let* ([ip (open-file-input-port "testfile.ss")]
-                   [sfd (make-source-file-descriptor "testfile.ss" ip #t)]
-                   [ip (transcoded-port ip (native-transcoder))])
-              (let-values ([(x efp) (get-datum/annotations ip sfd 0)])
-                (close-port ip)
-                (parameterize ([optimize-level 2] [enable-cp0 #f] [#%$suppress-primitive-inlining #f]) (expand/optimize x))))])
-     ; redundant keys might or might not be pruned, so allow it both ways
-     (or (equivalent-expansion?
-           x
-           '(begin
-              (set! foo
-                (lambda (x)
-                  (let ([t x])
-                    (if (#2%member t '("three" 4))
-                        'B
-                        (if (#2%member t '("three" 5))
-                            'A
-                            #f)))))
-              (#2%void)))
-         (equivalent-expansion?
-           x
-           '(begin
-              (set! foo
-                (lambda (x)
-                  (let ([t x])
-                    (if (#2%member t '("three" 4))
-                        'B
-                        (if (#2%member t '(5))
-                            'A
-                            #f)))))
-              (#2%void)))))
-   (equal?
-     (with-output-to-string
-       (lambda ()
-         (parameterize ([compile-profile #t]) (load "testfile.ss" compile))))
-     "AAAAAAAAAAB")
-   (begin
-     (profile-dump-data "testfile.pd")
-     (profile-load-data "testfile.pd")
+     (profile-load-data "testfile.pd" "testfile.pd")
      #t)
    (equal?
      (with-output-to-string
        (lambda ()
          (load "testfile.ss" compile)))
-     "AAAAAAAAAAB")
-   ; verify reordering based on profile information
-   (equivalent-expansion?
-     (let* ([ip (open-file-input-port "testfile.ss")]
-            [sfd (make-source-file-descriptor "testfile.ss" ip #t)]
-            [ip (transcoded-port ip (native-transcoder))])
-       (let-values ([(x efp) (get-datum/annotations ip sfd 0)])
-         (close-port ip)
-         (parameterize ([optimize-level 2] [enable-cp0 #f] [#%$suppress-primitive-inlining #f]) (expand/optimize x))))
-     '(begin
-        (set! foo
-          (lambda (x)
-            (let ([t x])
-              (if (#2%member t '(5))
-                  'A
-                  (if (#2%member t '("three" 4))
-                      'B
-                      #f)))))
-        (#2%void)))
+     "(1 11 1 10 0)\n")
    (begin
      (profile-clear-database)
      #t)
+ )
+
+(mat case
+  (error? ; invalid syntax
+    (case 3 [a . b]))
+  (eq? (case 'a [a 'yes] [b 'no]) 'yes)
+  (let ((a 'a))
+    (and
+      (begin (set! a 'a)
+        (case a (a #t) ((b c) #f))
+        (case a (a #t) ((b c) #f) (else #f)))
+      (begin (set! a 'b)
+        (case a (a #f) ((b c) #t))
+        (case a (a #f) ((b c) #t) (else #f)))
+      (begin (set! a 'c)
+        (case a (a #f) ((b c) #t))
+        (case a (a #f) ((b c) #t) (else #f)))
+      (begin (set! a 'd)
+        (case a (a #f) ((b c) #f) (else #t)))))
+  (let ([f (lambda (x)
+             (case x
+               (#\a 'case1)
+               (1/2 'case2)
+               (999999999999999 'case3)
+               (3.4 'case4)
+               (else 'oops)))])
+    (and (eq? (f (string-ref "abc" 0)) 'case1)
+         (eq? (f (exact 0.5)) 'case2)
+         (eq? (f (- 1000000000000000 1)) 'case3)
+         (eq? (f (+ 3.0 4/10)) 'case4)
+         (eq? (f 'b) 'oops)))
+  (case '() [() #f] [else #t])
+  (case '() [(()) #t] [else #f])
+  (case "meow" ["meow" #t] [else #f])
+  (case '(1 2 3) [((1 2 3) (3 2 1)) #t] [else #f])
+  (case 'a [1 6] ["meow" #f] [(a b c) #t])
+  (case #\: [1 6] ["meow" #f] [(a b c) #f] [(#\; #\9 #\: #\4) #t])
+  (case (/ 12.0 3.0) [(4 5 6) #f] [("bla") #f] [(a b c) #f] [(1 5.8 4.9 4.0) #t] [else #f])
+  (begin
+    (with-output-to-file "testfile.ss"
+      (lambda ()
+        (pretty-print
+          '(define foo
+             (lambda (x)
+               (case x
+                 [("three" 4) 'B]
+                 [("three" 5) 'A]
+                 [else #f]))))
+        (pretty-print
+          '(begin
+             (do ([i 10 (fx- i 1)]) ((fx= i 0)) (write (foo 5)))
+             (write (foo "three")))))
+      'replace)
+    (profile-clear-database)
+    #t)
+  ; verify no reordering w/no profile information
+  (let ([x (let* ([ip (open-file-input-port "testfile.ss")]
+                  [sfd (make-source-file-descriptor "testfile.ss" ip #t)]
+                  [ip (transcoded-port ip (native-transcoder))])
+             (let-values ([(x efp) (get-datum/annotations ip sfd 0)])
+               (close-port ip)
+               (parameterize ([optimize-level 2] [enable-cp0 #f] [#%$suppress-primitive-inlining #f]) (expand/optimize x))))])
+    ; redundant keys might or might not be pruned, so allow it both ways
+    (or (equivalent-expansion?
+          x
+          '(begin
+             (set! foo
+               (lambda (x)
+                 (let ([t x])
+                   (if (#2%member t '("three" 4))
+                       'B
+                       (if (#2%member t '("three" 5))
+                           'A
+                           #f)))))
+             (#2%void)))
+        (equivalent-expansion?
+          x
+          '(begin
+             (set! foo
+               (lambda (x)
+                 (let ([t x])
+                   (if (#2%member t '("three" 4))
+                       'B
+                       (if (#2%member t '(5))
+                           'A
+                           #f)))))
+             (#2%void)))))
+  (equal?
+    (with-output-to-string
+      (lambda ()
+        (parameterize ([compile-profile #t]) (load "testfile.ss" compile))))
+    "AAAAAAAAAAB")
+  (begin
+    (profile-dump-data "testfile.pd" (remp preexisting-profile-dump-entry? (profile-dump)))
+    (profile-load-data "testfile.pd")
+    #t)
+  (equal?
+    (with-output-to-string
+      (lambda ()
+        (load "testfile.ss" compile)))
+    "AAAAAAAAAAB")
+  ; verify reordering based on profile information
+  (equivalent-expansion?
+    (let* ([ip (open-file-input-port "testfile.ss")]
+           [sfd (make-source-file-descriptor "testfile.ss" ip #t)]
+           [ip (transcoded-port ip (native-transcoder))])
+      (let-values ([(x efp) (get-datum/annotations ip sfd 0)])
+        (close-port ip)
+        (parameterize ([optimize-level 2] [enable-cp0 #f] [#%$suppress-primitive-inlining #f]) (expand/optimize x))))
+    '(begin
+       (set! foo
+         (lambda (x)
+           (let ([t x])
+             (if (#2%member t '(5))
+                 'A
+                 (if (#2%member t '("three" 4))
+                     'B
+                     #f)))))
+       (#2%void)))
+  (begin
+    (profile-clear-database)
+    #t)
+  (equivalent-expansion?
+    (parameterize ([optimize-level 2] [enable-cp0 #f] [#%$suppress-primitive-inlining #f])
+      (expand/optimize '(lambda (x) (case x [(a b a 7) 'one] [(c a 7 9) 'two] [else 'three]))))
+    '(lambda (x)
+       (let ([t x])
+         (if (#2%member t '(a b 7))
+             'one
+             (if (#2%member t '(c 9))
+                 'two
+                 'three)))))
+  ; ensure we don't miss syntax errors through case discarding unreachable clause bodies
+  (error? ; invalid syntax (if)
+    (lambda (x)
+      (case x
+        [(a) 'one]
+        [(b c) 'two]
+        [(a b c) (if)]
+        [else #f])))
+  ; ensure expansion into cond doesn't cause => to "work" for case
+  (error? ; invalid syntax =>
+    (lambda (x)
+      (case x
+        [(a b c) => values])))
+  (error? ; invalid syntax =>
+    (lambda (x)
+      (case x
+        [(a b c) #f]
+        [(d e f) => values])))
+  (error? ; invalid syntax =>
+    (lambda (x)
+      (case x
+        [(a b c) #f]
+        [(a b c) => values])))
+  (error? ; invalid syntax =>
+    (lambda (x)
+      (case x
+        [(a b c) => values]
+        [else #f])))
+  (error? ; invalid syntax =>
+    (lambda (x)
+      (case x
+        [(a b c) #f]
+        [(d e f) => values]
+        [else #f])))
+  (error? ; invalid syntax =>
+    (lambda (x)
+      (case x
+        [(a b c) #f]
+        [(a b c) => values]
+        [else #f])))
+  (error? ; invalid syntax (case)
+    (case))
 )
 
-
 (mat r6rs:case
-   (error? ; invalid syntax
-     (r6rs:case 'a [a 'yes] [b 'no]))
-   (error? ; invalid syntax
-     (let ()
-       (import (only (rnrs) case))
-       (case 'a [a 'yes] [b 'no])))
-   (let ((a 'a))
+  (error? ; invalid syntax
+    (let ()
       (import (only (rnrs) case))
-      (and
-        (begin (set! a 'a)
-               (case a ((a) #t) ((b c) #f))
-               (case a ((a) #t) ((b c) #f) (else #f)))
-        (begin (set! a 'b)
-               (case a ((a) #f) ((b c) #t))
-               (case a ((a) #f) ((b c) #t) (else #f)))
-        (begin (set! a 'c)
-               (case a ((a) #f) ((b c) #t))
-               (case a ((a) #f) ((b c) #t) (else #f)))
-        (begin (set! a 'd)
-               (case a ((a) #f) ((b c) #f) (else #t)))))
-    (let ([f (lambda (x)
-                (import (only (rnrs) case))
-                (case x
-                   ((#\a) 'case1)
-                   ((1/2) 'case2)
-                   ((999999999999999) 'case3)
-                   ((3.4) 'case4)
-                   (else 'oops)))])
-       (and (eq? (f (string-ref "abc" 0)) 'case1)
-            (eq? (f (exact 0.5)) 'case2)
-            (eq? (f (- 1000000000000000 1)) 'case3)
-            (eq? (f (+ 3.0 4/10)) 'case4)
-            (eq? (f 'b) 'oops)))
-    (case '() [() #f] [else #t])
-    (case '() [(()) #t] [else #f])
- )
+      (case 'a [a 'yes] [b 'no])))
+  (error? ; invalid syntax
+    (let ()
+      (import (only (rnrs) case))
+      (case 'a [a 'yes] [b 'no])))
+  (let ((a 'a))
+    (import (only (rnrs) case))
+    (and
+      (begin (set! a 'a)
+        (case a ((a) #t) ((b c) #f))
+        (case a ((a) #t) ((b c) #f) (else #f)))
+      (begin (set! a 'b)
+        (case a ((a) #f) ((b c) #t))
+        (case a ((a) #f) ((b c) #t) (else #f)))
+      (begin (set! a 'c)
+        (case a ((a) #f) ((b c) #t))
+        (case a ((a) #f) ((b c) #t) (else #f)))
+      (begin (set! a 'd)
+        (case a ((a) #f) ((b c) #f) (else #t)))))
+  (let ([f (lambda (x)
+             (import (only (rnrs) case))
+             (case x
+               ((#\a) 'case1)
+               ((1/2) 'case2)
+               ((999999999999999) 'case3)
+               ((3.4) 'case4)
+               (else 'oops)))])
+    (and (eq? (f (string-ref "abc" 0)) 'case1)
+         (eq? (f (exact 0.5)) 'case2)
+         (eq? (f (- 1000000000000000 1)) 'case3)
+         (eq? (f (+ 3.0 4/10)) 'case4)
+         (eq? (f 'b) 'oops)))
+  (let ()
+    (import (only (rnrs) case))
+    (case '() [() #f] [else #t]))
+  (let ()
+    (import (only (rnrs) case))
+    (case '() [(()) #t] [else #f]))
+  (equivalent-expansion?
+    (parameterize ([optimize-level 2] [enable-cp0 #f] [#%$suppress-primitive-inlining #f])
+      (expand/optimize '(lambda (x)
+                          (import (only (rnrs) case))
+                          (case x [(a b a 7) 'one] [(c a 7 9) 'two] [else 'three]))))
+    '(lambda (x)
+       (let ([t x])
+         (if (#2%memv t '(a b 7))
+             'one
+             (if (#2%memv t '(c 9))
+                 'two
+                 'three)))))
+  ; ensure we don't miss syntax errors through case discarding unreachable clause bodies
+  (error? ; invalid syntax (if)
+    (lambda (x)
+      (import (only (rnrs) case))
+      (case x
+        [(a) 'one]
+        [(b c) 'two]
+        [(a b c) (if)]
+        [else #f])))
+  ; ensure expansion into cond doesn't cause => to "work" for case
+  (error? ; invalid syntax =>
+    (lambda (x)
+      (import (only (rnrs) case))
+      (case x
+        [(a b c) => values])))
+  (error? ; invalid syntax =>
+    (lambda (x)
+      (import (only (rnrs) case))
+      (case x
+        [(a b c) #f]
+        [(d e f) => values])))
+  (error? ; invalid syntax =>
+    (lambda (x)
+      (import (only (rnrs) case))
+      (case x
+        [(a b c) #f]
+        [(a b c) => values])))
+  (error? ; invalid syntax =>
+    (lambda (x)
+      (import (only (rnrs) case))
+      (case x
+        [(a b c) => values]
+        [else #f])))
+  (error? ; invalid syntax =>
+    (lambda (x)
+      (import (only (rnrs) case))
+      (case x
+        [(a b c) #f]
+        [(d e f) => values]
+        [else #f])))
+  (error? ; invalid syntax =>
+    (lambda (x)
+      (import (only (rnrs) case))
+      (case x
+        [(a b c) #f]
+        [(a b c) => values]
+        [else #f])))
+  (error? ; invalid syntax (case)
+    (let ()
+      (import (only (rnrs) case))
+      (case)))
+)
 
 (mat record-case
    (record-case '(a b c)
@@ -956,7 +1091,23 @@
  ; make sure compiler doesn't bomb w/two few args
   (procedure? (lambda (x) (map x)))
   (error? ; nonprocedure
+    (map 3 '()))
+  (error? ; nonprocedure
+    (map 3 '() '()))
+  (error? ; nonprocedure
     (map 3 '(a b c)))
+  (error? ; nonprocedure
+    (parameterize ([optimize-level 3])
+      (eval '(#2%map 3 '(a b c)))))
+  (error? ; nonprocedure
+    (parameterize ([optimize-level 3])
+      (eval
+        '(let ()
+           (define (f p b)
+             (unbox b)
+             (#2%map p (if (box? b) '() '(1 2 3)))
+             (list p (procedure? p)))
+           (f 7 (box 0))))))
   (error? ; improper list
     (map pretty-print 'a))
   (error? ; improper list
@@ -1285,6 +1436,10 @@
   (procedure? (lambda (x) (fold-left x)))
   (procedure? (lambda (x) (fold-left x y)))
   (error? ; nonprocedure
+    (fold-left 3 0 '()))
+  (error? ; nonprocedure
+    (fold-left 3 0 '() '()))
+  (error? ; nonprocedure
     (fold-left 3 0 '(a b c)))
   (error? ; improper list
     (fold-left cons 0 'a))
@@ -1408,6 +1563,10 @@
  ; make sure compiler doesn't bomb w/two few args
   (procedure? (lambda (x) (fold-right x)))
   (procedure? (lambda (x) (fold-right x y)))
+  (error? ; nonprocedure
+    (fold-right 3 0 '()))
+  (error? ; nonprocedure
+    (fold-right 3 0 '() '()))
   (error? ; nonprocedure
     (fold-right 3 0 '(a b c)))
   (error? ; improper list
@@ -1587,7 +1746,23 @@
  ; make sure compiler doesn't bomb w/two few args
   (procedure? (lambda (x) (for-each x)))
   (error? ; nonprocedure
+    (for-each 3 '()))
+  (error? ; nonprocedure
+    (for-each 3 '() '()))
+  (error? ; nonprocedure
     (for-each 3 '(a b c)))
+  (error? ; nonprocedure
+    (parameterize ([optimize-level 3])
+      (eval '(#2%for-each 3 '(a b c)))))
+  (error? ; nonprocedure
+    (parameterize ([optimize-level 3])
+      (eval
+        '(let ()
+           (define (f p b)
+             (unbox b)
+             (#2%for-each p (if (box? b) '() '(1 2 3)))
+             (list p (procedure? p)))
+           (f 7 (box 0))))))
   (error? ; improper list
     (for-each pretty-print 'a))
   (error? ; improper list
@@ -2094,6 +2269,10 @@
  ; make sure compiler doesn't bomb w/two few args
   (procedure? (lambda (x) (ormap x)))
   (error? ; nonprocedure
+    (ormap 3 '()))
+  (error? ; nonprocedure
+    (ormap 3 '() '()))
+  (error? ; nonprocedure
     (ormap 3 '(a b c)))
   (error? ; improper list
     (ormap not 'a))
@@ -2194,6 +2373,10 @@
    (eq? (andmap (lambda (x y z) #t) '() '() '()) #t)
  ; make sure compiler doesn't bomb w/two few args
   (procedure? (lambda (x) (andmap x)))
+  (error? ; nonprocedure
+    (andmap 3 '()))
+  (error? ; nonprocedure
+    (andmap 3 '() '()))
   (error? ; nonprocedure
     (andmap 3 '(a b c)))
   (error? ; improper list
@@ -2296,6 +2479,10 @@
  ; make sure compiler doesn't bomb w/two few args
   (procedure? (lambda (x) (exists x)))
   (error? ; nonprocedure
+    (exists 3 '()))
+  (error? ; nonprocedure
+    (exists 3 '() '()))
+  (error? ; nonprocedure
     (exists 3 '(a b c)))
   (error? ; improper list
     (exists not 'a))
@@ -2396,6 +2583,10 @@
    (eq? (for-all (lambda (x y z) #t) '() '() '()) #t)
  ; make sure compiler doesn't bomb w/two few args
   (procedure? (lambda (x) (for-all x)))
+  (error? ; nonprocedure
+    (for-all 3 '()))
+  (error? ; nonprocedure
+    (for-all 3 '() '()))
   (error? ; nonprocedure
     (for-all 3 '(a b c)))
   (error? ; improper list
@@ -3288,7 +3479,274 @@
        (error #f "no static-generation fraz in object-counts list"))
      (pretty-print (cons g x)) ; keep 'em live
      #t)
+
+   (parameterize ([collect-request-handler void])
+     (define (get-all g) (let ([q (g)]) (if q (cons q (get-all g)) '())))
+     (module (insist)
+       (define ($insist e? expr expected got)
+         (unless (e? got expected)
+           (errorf #f "expected ~s to return ~s, got ~s" expr expected got)))
+       (define-syntax insist
+         (syntax-rules ()
+           [(_ ?e? ?expr ?expected)
+            ($insist ?e? '?expr ?expected ?expr)])))
+     (let ([g1 (make-guardian)] [g2 (make-guardian)])
+       (let ([x (box (cons 'a 'b))] [y (box (cons 'c 'd))])
+         (insist eq? (unregister-guardian g1) '())
+         (insist eq? (unregister-guardian g2) '())
+         (g1 (unbox x))
+         (g1 (unbox y))
+         (g2 (unbox x))
+         (g1 (unbox y))
+         (g1 (unbox x))
+         (collect 0 0)
+         (g2 (unbox x))
+         (g1 (cons 'e 'f))
+         (g2 (unbox x))
+         (g1 (unbox x))
+         (g2 (cons 'g 'h))
+         (insist eq? (get-all g1) '())
+         (insist eq? (get-all g2) '())
+         (let ([q (unregister-guardian g2)])
+           (unless (and (= (length q) 4) (equal? (remove '(g . h) q) (list (unbox x) (unbox x) (unbox x))))
+             (errorf #f "expected (unregister-guardian g2) to contain x = (a . b), x = (a . b), and (g . h), got ~s" q)))
+         (insist eq? (unregister-guardian g2) '())
+         (insist eq? (get-all g1) '())
+         (insist eq? (get-all g2) '())
+         (collect 0 0)
+         (insist equal? (get-all g1) '((e . f)))
+         (insist eq? (get-all g2) '())
+         (g2 (unbox x))
+         (set-box! x #f)
+         (collect 0 0)
+         (insist equal? (get-all g1) '((a . b) (a . b) (a . b)))
+         (insist equal? (get-all g2) '((a . b)))
+         (insist equal? (unregister-guardian g1) '((c . d) (c . d)))
+         (insist eq? (unregister-guardian g2) '())
+         (pretty-print (list g1 g2 x y)))) ; keep 'em live
+     #t)
  )
+
+(mat refcount-guardians
+  (error? ; unrecognized ftype
+    (ftype-guardian NO!))
+  (error? ; first element must be a word-sized integer with native endianness
+    (let ()
+      (define-ftype A (struct))
+      (ftype-guardian A)))
+  (error? ; first element must be a word-sized integer with native endianness
+    (let ()
+      (define-ftype A (union [u1 (struct (refcount char))] [u2 (struct (foo (* A)))]))
+      (ftype-guardian A)))
+  (error? ; invalid ftype-guardian argument
+    (let ()
+      (define-ftype A (struct (refcount iptr) (x int)))
+      (define g (ftype-guardian A))
+      (g (cons 'ka 'blooie))))
+  (error? ; invalid ftype-guardian argument
+    (let ()
+      (define-ftype A (struct (refcount iptr) (x int)))
+      (define g (ftype-guardian A))
+      (g (make-ftype-pointer iptr 0))))
+  (eq?
+    (let ()
+      (define-ftype A (struct (refcount iptr) (x int)))
+      (define g (ftype-guardian iptr))
+      (g (make-ftype-pointer A 0)))
+    (void))
+  (with-interrupts-disabled
+    (let ()
+      (define-ftype A (struct (refcount iptr) (x int)))
+      (define g (ftype-guardian A))
+      (define a (make-ftype-pointer A (foreign-alloc (ftype-sizeof A))))
+      (ftype-set! A (refcount) a 0)
+      (assert (not (ftype-locked-incr! A (refcount) a)))
+      (assert (eqv? (ftype-ref A (refcount) a) 1))
+      (g a)
+      (set! a #f)
+      (collect 0 0)
+      (assert (eqv? (ftype-ref A (refcount) (g)) 0))
+      (assert (not (g)))
+      #t))
+  (with-interrupts-disabled
+    (let ()
+      (define-ftype A (struct (refcount uptr) (x int)))
+      (define g (ftype-guardian A))
+      (define addr (foreign-alloc (ftype-sizeof A)))
+      (define a1 (make-ftype-pointer A addr))
+      (define a2 (make-ftype-pointer A addr))
+      (define wpa1 (weak-cons a1 '()))
+      (define wpa2 (weak-cons a2 '()))
+      (ftype-set! A (refcount) a1 0)
+      (ftype-set! A (x) a1 17)
+      (assert (eqv? (ftype-ref A (x) a1) 17))
+      (assert (eqv? (ftype-ref A (x) a2) 17))
+      (assert (eqv? (ftype-ref A (refcount) a1) 0))
+      (assert (eqv? (ftype-ref A (refcount) a2) 0))
+      (assert (not (ftype-locked-incr! A (refcount) a1)))
+      (assert (not (ftype-locked-incr! A (refcount) a2)))
+      (assert (eqv? (ftype-ref A (refcount) a1) 2))
+      (assert (eqv? (ftype-ref A (refcount) a2) 2))
+      (g a1)
+      (g a2)
+      (collect 0 0)
+      (assert (not (g)))
+      (set! a1 #f)
+      (collect 0 0)
+      (assert (not (g)))
+      (set! a2 #f)
+      (collect 0 0)
+      (set! a2 (g))
+      (assert (eq? (car wpa2) a2))
+      (assert (not (g)))
+      (assert (eqv? (ftype-ref A (refcount) a2) 0))
+      #t))
+  (with-interrupts-disabled
+    (let ()
+      (define-ftype A (struct (refcount iptr) (x int)))
+      (define g (ftype-guardian A))
+      (define regular-g (make-guardian))
+      (define addr (foreign-alloc (ftype-sizeof A)))
+      (define a (make-ftype-pointer A addr))
+      (ftype-set! A (refcount) a 0)
+      (assert (not (ftype-locked-incr! A (refcount) a)))
+      (assert (eqv? (ftype-ref A (refcount) a) 1))
+      (regular-g a)
+      (g a)
+      (regular-g a)
+      (set! a #f)
+      (collect 0 0)
+      (assert (eqv? (ftype-ref A (refcount) (regular-g)) 0))
+      (assert (eqv? (ftype-ref A (refcount) (regular-g)) 0))
+      (assert (eqv? (ftype-ref A (refcount) (g)) 0))
+      (assert (not (regular-g)))
+      (assert (not (g)))
+      #t))
+  (with-interrupts-disabled
+    (let ()
+      (define-ftype A (struct (refcount uptr) (x int)))
+      (define g (ftype-guardian A))
+      (define regular-g (make-guardian))
+      (define addr (foreign-alloc (ftype-sizeof A)))
+      (define a (make-ftype-pointer A addr))
+      (ftype-set! A (refcount) a 0)
+      (assert (not (ftype-locked-incr! A (refcount) a)))
+      (assert (not (ftype-locked-incr! A (refcount) a)))
+      (assert (eqv? (ftype-ref A (refcount) a) 2))
+      (regular-g a)
+      (g a)
+      (regular-g a)
+      (set! a #f)
+      (collect 0 0)
+      (assert (eqv? (ftype-ref A (refcount) (regular-g)) 1))
+      (assert (eqv? (ftype-ref A (refcount) (regular-g)) 1))
+      (assert (not (regular-g)))
+      (assert (not (g)))
+      #t))
+  (with-interrupts-disabled
+    (let ()
+      (define-ftype A (struct (refcount iptr) (x int)))
+      (define g (ftype-guardian A))
+      (define regular-g (make-guardian))
+      (define addr (foreign-alloc (ftype-sizeof A)))
+      (define a (make-ftype-pointer A addr))
+      (ftype-set! A (refcount) a 0)
+      (assert (not (ftype-locked-incr! A (refcount) a)))
+      (assert (not (ftype-locked-incr! A (refcount) a)))
+      (assert (eqv? (ftype-ref A (refcount) a) 2))
+      (regular-g a)
+      (g a)
+      (g a)
+      (regular-g a)
+      (set! a #f)
+      (collect 0 0)
+      (assert (eqv? (ftype-ref A (refcount) (regular-g)) 0))
+      (assert (eqv? (ftype-ref A (refcount) (regular-g)) 0))
+      (assert (eqv? (ftype-ref A (refcount) (g)) 0))
+      (assert (not (regular-g)))
+      (assert (not (g)))
+      #t))
+
+   (parameterize ([collect-request-handler void])
+     (define-ftype A (struct (refcount iptr) (uid int)))
+     (define (get-all g)
+       (let ([a (g)])
+         (if a
+             (begin
+               (unless (eqv? (ftype-ref A (refcount) a) 0)
+                 (errorf 'get-all "nonzero refcount ~s, uid ~s" (ftype-ref A (refcount) a) (ftype-ref A (uid) a)))
+               (cons a (get-all g)))
+             '())))
+     (module (insist)
+       (define ($insist e? expr expected got)
+         (unless (e? got expected)
+           (errorf #f "expected ~s to return ~s, got ~s" expr expected got)))
+       (define-syntax insist
+         (syntax-rules ()
+           [(_ ?e? ?expr ?expected)
+            ($insist ?e? '?expr ?expected ?expr)])))
+     (define (get-uid a) (ftype-ref A (uid) a))
+     (define (fritter addr refcount uid)
+       (let ([a (make-ftype-pointer A addr)])
+         (ftype-set! A (refcount) a refcount)
+         (ftype-set! A (uid) a uid)
+         (box a)))
+     (let ([x-addr (foreign-alloc (ftype-sizeof A))] [y-addr (foreign-alloc (ftype-sizeof A))] [z-addr (foreign-alloc (ftype-sizeof A))])
+       (let ([x1 (fritter x-addr 6 73)] [x2 (box (make-ftype-pointer A x-addr))] [y (fritter y-addr 2 57)] [z (fritter z-addr 2 91)])
+         (let ([g1 (ftype-guardian A)] [g2 (ftype-guardian A)])
+           (insist eq? (unregister-guardian g1) '())
+           (insist eq? (unregister-guardian g2) '())
+           (g1 (unbox x1))
+           (g2 (unbox x1))
+           (g1 (unbox x1))
+           (g1 (unbox x2))
+           (g2 (unbox x1))
+           (g1 (unbox y))
+           (g1 (unbox y))
+           (g2 (unbox z))
+           (g1 (unbox z))
+           (insist eq? (get-all g1) '())
+           (insist eq? (get-all g2) '())
+           (let ([q (unregister-guardian g2)])
+             (define (decr-refcount! a) (ftype-locked-decr! A (refcount) a))
+             (unless (and (= (length q) 3) (memq (unbox x1) (memq (unbox x1) q)) (memq (unbox z) q))
+               (errorf #f "expected (unregister-guardian g2) to contain x/uid 73, x/uid 73, and z/uid 91, got ~s" (map get-uid q)))
+             (map decr-refcount! q))
+           (insist eq? (unregister-guardian g2) '())
+           (insist eq? (get-all g1) '())
+           (insist eq? (get-all g2) '())
+           (pretty-print z) ; keep it live
+           (set-box! z #f)
+           (collect 0 0)
+           (insist equal? (map get-uid (get-all g1)) '(91))
+           (insist eq? (get-all g2) '())
+           (g2 (unbox x1))
+           (pretty-print x1) ; keep it live
+           (set-box! x1 #f)
+           (collect 0 0)
+           (insist eq? (get-all g1) '())
+           (insist eq? (get-all g2) '())
+           (insist eq? (unregister-guardian g2) '())
+           (insist eqv? (ftype-ref A (refcount) (unbox x2)) 1)
+           (pretty-print x2) ; keep it live
+           (set-box! x2 #f)
+           (collect 0 0)
+           (insist equal? (map get-uid (get-all g1)) '(73))
+           (insist equal? (map get-uid (get-all g2)) '())
+           (insist eq? (unregister-guardian g2) '())
+           (pretty-print y) ; keep it live
+           (set-box! y #f)
+           (collect 0 0)
+           (insist equal? (map get-uid (get-all g1)) '(57))
+           (insist equal? (map get-uid (get-all g2)) '())
+           (insist eq? (unregister-guardian g1) '())
+           (insist eq? (unregister-guardian g2) '())
+           (pretty-print (list g1 g2 x y)))) ; keep 'em live
+       (foreign-free x-addr)
+       (foreign-free y-addr)
+       (foreign-free z-addr))
+     #t)
+  )
 
 (mat weak-cons
    (procedure? weak-cons)
@@ -3372,7 +3830,7 @@
    ;; ----------------------------------------
    ;; Stress test to check that the GC doesn't suffer from quadratic
    ;; behavior
-   (begin
+   (let ()
      (define (wrapper v) (list 1 2 3 4 5 v))
      
      ;; Create a chain of ephemerons where we have all
@@ -3408,21 +3866,24 @@
        ;; off the end of the discover-ephemerons-one-at-a-time
        ;; chain, which is the most complex case for avoiding
        ;; quadratic GC times
-       (define-values (key es) (mk n (gensym) '()))
-       (define-values (root holds) (mk* n key es))
-
-       (define start (current-time))
-       (collect (collect-maximum-generation))
-       (let ([delta (time-difference (current-time) start)])
-         ;; Sanity check on ephemerons
-         (for-each (lambda (e)
-                     (when (eq? #!bwp (ephemeron-key e))
-                       (error 'check "oops")))
-                   es)
-         ;; Keep `root` and `holds` live:
-         (keep-alive (cons root holds))
-         ;; Return duration:
-         delta))
+       (parameterize ([collect-request-handler void] [collect-maximum-generation (max (collect-maximum-generation) 2)])
+         (collect 2)
+         (let*-values ([(key es) (mk n (gensym) '())]
+                       [(root holds) (mk* n key es)])
+           (let ([start (current-time)])
+             (collect 0 1)
+             (collect 1 2)
+             (collect 2 2)
+             (let ([delta (time-difference (current-time) start)])
+               ;; Sanity check on ephemerons
+               (for-each (lambda (e)
+                           (when (eq? #!bwp (ephemeron-key e))
+                             (error 'check "oops")))
+                         es)
+               ;; Keep `root` and `holds` live:
+               (keep-alive (cons root holds))
+               ;; Return duration:
+               delta)))))
 
      (define N 10000)
 
@@ -3434,11 +3895,14 @@
        (define dummy2 (set! dummy #f))
        (define t2 (measure-time N keep-alive))
        (define (duration->inexact t) (+ (* (time-second t) 1e9)
-                                        (time-nanosecond t)))
+                                        (inexact (time-nanosecond t))))
        (set! dummy #f)
-       (or (< (/ (duration->inexact t1) (duration->inexact t2)) 20)
-           (and (positive? tries)
-                (loop (sub1 tries))))))
+       (let ([t1 (duration->inexact t1)] [t2 (duration->inexact t2)])
+         (or (< (/ t1 t2) 20)
+           (begin
+             (printf "t1 = ~s, t2 = ~s, t1/t2 = ~s\n" t1 t2 (/ t1 t2))
+             (and (positive? tries)
+               (loop (sub1 tries))))))))
 
    ;; ----------------------------------------
    ;; Check interaction of mutation and generations

@@ -1,4 +1,3 @@
-"interpret.ss"
 ;;; interpret.ss
 ;;; Copyright 1984-2017 Cisco Systems, Inc.
 ;;; 
@@ -459,7 +458,7 @@
       [(seq ,e1 ,e2)
        (let ((e1 (ip2 e1)) (e2 (ip2 e2)))
          ($rt lambda () ($rt e1) ($rt e2)))]
-      [(foreign ,conv ,name ,e (,arg-type* ...) ,result-type)
+      [(foreign (,conv* ...) ,name ,e (,arg-type* ...) ,result-type)
        (unless $compiler-is-loaded?
          ($oops 'interpret "cannot compile foreign-procedure: compiler is not loaded"))
        (let ([p ($compile-backend
@@ -468,11 +467,11 @@
                     (with-output-language (Lsrc Expr)
                       `(case-lambda ,(make-preinfo-lambda)
                          (clause (,t) 1
-                           (foreign ,conv ,name (ref #f ,t)
+                           (foreign (,conv* ...) ,name (ref #f ,t)
                              (,arg-type* ...) ,result-type))))))])
          (let ([e (ip2 e)])
            ($rt lambda () ((p) ($rt e)))))]
-      [(fcallable ,conv ,e (,arg-type* ...) ,result-type)
+      [(fcallable (,conv* ...) ,e (,arg-type* ...) ,result-type)
        (unless $compiler-is-loaded?
          ($oops 'interpret "cannot compile foreign-callable: compiler is not loaded"))
        (let ([p ($compile-backend
@@ -481,7 +480,7 @@
                     (with-output-language (Lsrc Expr)
                       `(case-lambda ,(make-preinfo-lambda)
                          (clause (,t) 1
-                           (fcallable ,conv (ref #f ,t) (,arg-type* ...) ,result-type))))))])
+                           (fcallable (,conv* ...) (ref #f ,t) (,arg-type* ...) ,result-type))))))])
          (let ([e (ip2 e)])
            ($rt lambda () ((p) ($rt e)))))]
       [else (unexpected-record x)])))
@@ -645,40 +644,44 @@
           (c-var-index-set! (car vars) i)
           (loop (cdr vars) regs (fx+ i 1))])))))
 
-(define-pass interpret-Lexpand : Lexpand (ir situation for-import? ofn eoo) -> * (val)
+(define-pass interpret-Lexpand : Lexpand (ir situation for-import? importer ofn eoo) -> * (val)
   (definitions
     (define (ibeval x1)
       ($rt (parameterize ([$target-machine (machine-type)] [$sfd #f])
-             (let* ([x2 ($cpvalid x1)]
+             (let* ([x2 ($pass-time 'cpvalid (lambda () ($cpvalid x1)))]
                     [x2a (let ([cpletrec-ran? #f])
                            (let ([x ((run-cp0)
                                      (lambda (x)
                                        (set! cpletrec-ran? #t)
-                                       ($cpletrec ($cp0 x #f)))
+                                       (let ([x ($pass-time 'cp0 (lambda () ($cp0 x #f)))])
+                                         ($pass-time 'cpletrec
+                                           (lambda () ($cpletrec x)))))
                                      x2)])
-                             (if cpletrec-ran? x ($cpletrec x))))]
-                    [x2b ($cpcheck x2a)])
+                             (if cpletrec-ran? x ($pass-time 'cpletrec (lambda () ($cpletrec x))))))]
+                    [x2b ($pass-time 'cpcheck (lambda () ($cpcheck x2a)))]
+                    [x2b ($pass-time 'cpcommonize (lambda () ($cpcommonize x2b)))])
                (when eoo (pretty-print ($uncprep x2b) eoo))
-               (ip2 (ip1 x2b))))
+               (let ([x ($pass-time 'ip1 (lambda () (ip1 x2b)))])
+                 ($pass-time 'ip2 (lambda () (ip2 x))))))
         ([a0 0] [a1 0] [fp 0] [cp 0]))))
   (Inner : Inner (ir) -> * (val)
     [,lsrc (ibeval lsrc)]
     [(program ,uid ,body)
      (ibeval ($build-invoke-program uid body))]
-    [(library/ct ,uid ,import-code ,visit-code)
-     (ibeval ($build-install-library/ct-code uid import-code visit-code))]
+    [(library/ct ,uid (,export-id* ...) ,import-code ,visit-code)
+     (ibeval ($build-install-library/ct-code uid export-id* import-code visit-code))]
     [(library/rt ,uid (,dl* ...) (,db* ...) (,dv* ...) (,de* ...) ,body)
      (ibeval ($build-install-library/rt-code uid dl* db* dv* de* body))]
-    [,linfo/rt ($install-library/rt-desc linfo/rt for-import? ofn)]
-    [,linfo/ct ($install-library/ct-desc linfo/ct for-import? ofn)]
-    [,pinfo ($install-program-desc pinfo)]
+    [(library/rt-info ,linfo/rt) ($install-library/rt-desc linfo/rt for-import? importer ofn)]
+    [(library/ct-info ,linfo/ct) ($install-library/ct-desc linfo/ct for-import? importer ofn)]
+    [(program-info ,pinfo) ($install-program-desc pinfo)]
     [else (sorry! who "unexpected language form ~s" ir)])
   (Outer : Outer (ir) -> * (val)
     ; can't use cata since (Outer outer1) might return 0 or more than one value
     [(group ,outer1 ,outer2) (Outer outer1) (Outer outer2)]
     [(visit-only ,inner) (unless (eq? situation 'revisit) (Inner inner))]
     [(revisit-only ,inner) (unless (eq? situation 'visit) (Inner inner))]
-    [,rcinfo (void)]
+    [(recompile-info ,rcinfo) (void)]
     [,inner (Inner inner)]
     [else (sorry! who "unexpected language form ~s" ir)])
   (Outer ir))
@@ -693,16 +696,18 @@
              (interaction-environment)))]
       [(x0 env-spec)
        (unless (environment? env-spec) ($oops 'interpret "~s is not an environment" env-spec))
-       (let ([x1 (parameterize ([$target-machine (machine-type)] [$sfd #f])
-                   (expand x0 env-spec #t))])
+       (let ([x1 ($pass-time 'expand
+                   (lambda ()
+                     (parameterize ([$target-machine (machine-type)] [$sfd #f])
+                       (expand x0 env-spec #t))))])
          ($uncprep x1 #t) ; populate preinfo sexpr fields
          (when (and (expand-output) (not ($noexpand? x0)))
            (pretty-print ($uncprep x1) (expand-output)))
-         (interpret-Lexpand x1 'load #f #f (and (not ($noexpand? x0)) (expand/optimize-output))))])))
+         (interpret-Lexpand x1 'load #f #f #f (and (not ($noexpand? x0)) (expand/optimize-output))))])))
 
 (set! $interpret-backend
-  (lambda (x situation for-import? ofn)
-    (interpret-Lexpand x situation for-import? ofn (expand/optimize-output))))
+  (lambda (x situation for-import? importer ofn)
+    (interpret-Lexpand x situation for-import? importer ofn (expand/optimize-output))))
+(current-eval interpret)
 )
 
-(current-eval interpret)

@@ -1,4 +1,3 @@
-"7.ss"
 ;;; 7.ss
 ;;; Copyright 1984-2017 Cisco Systems, Inc.
 ;;; 
@@ -16,6 +15,7 @@
 
 ;;; system operations
 
+(begin
 (define scheme-start
   (make-parameter
     (lambda fns (for-each load fns) (new-cafe))
@@ -96,8 +96,8 @@
 (define-who with-source-path
   (lambda (whoarg fn p)
     (unless (or (eq? whoarg #f) (string? whoarg) (symbol? whoarg)) ($oops who "invalid who argument ~s" whoarg))
+    (unless (string? fn) ($oops who "~s is not a string" fn))
     (unless (procedure? p) ($oops who "~s is not a procedure" p))
-    (unless (string? fn) ($oops whoarg "~s is not a string" fn))
     (let ([dirs (source-directories)])
       (if (or (equal? dirs '("")) (equal? dirs '(".")) ($fixed-path? fn))
           (p fn)
@@ -118,9 +118,16 @@
                       (p path)
                       (loop (cdr ls))))))))))
 
-(set! fasl-read
+(set! $compressed-warning
+  (let ([warned? #f])
+    (lambda (who p)
+      (unless warned?
+        (set! warned? #t)
+        (warningf who "fasl file content is compressed internally; compressing the file (~s) is redundant and can slow fasl writing and reading significantly" p)))))
+
+(set-who! fasl-read
   (let ()
-    (define $fasl-read (foreign-procedure "(cs)fasl_read" (ptr boolean ptr) ptr))
+    (define $fasl-read (foreign-procedure "(cs)fasl_read" (int fixnum ptr) ptr))
     (define $bv-fasl-read (foreign-procedure "(cs)bv_fasl_read" (ptr ptr) ptr))
     (define (get-uptr p)
       (let ([k (get-u8 p)])
@@ -129,48 +136,92 @@
               (let ([k (get-u8 p)])
                 (f k (logor (ash n 7) (fxsrl k 1))))
               n))))
-    (define (malformed p) ($oops 'fasl-read "malformed fasl-object header found in ~s" p))
+    (define (get-uptr/bytes p)
+      (let ([k (get-u8 p)])
+        (let f ([k k] [n (fxsrl k 1)] [bytes 1])
+          (if (fxlogbit? 0 k)
+              (let ([k (get-u8 p)])
+                (f k (logor (ash n 7) (fxsrl k 1)) (fx+ bytes 1)))
+              (values n bytes)))))
+    (define (malformed p what) ($oops who "malformed fasl-object found in ~s (~a)" p what))
     (define (check-header p)
       (let ([bv (make-bytevector 8 (constant fasl-type-header))])
         (unless (and (eqv? (get-bytevector-n! p bv 1 7) 7)
                      (bytevector=? bv (constant fasl-header)))
-          (malformed p)))
+          (malformed p "invalid header")))
       (let ([n (get-uptr p)])
         (unless (= n (constant scheme-version))
-          ($oops 'fasl-read "incompatible fasl-object version ~a found in ~s"
+          ($oops who "incompatible fasl-object version ~a found in ~s"
             ($format-scheme-version n) p)))
       (let ([n (get-uptr p)])
         (unless (or (= n (constant machine-type-any)) (= n (constant machine-type)))
           (cond
             [(assv n (constant machine-type-alist)) =>
              (lambda (a)
-               ($oops 'fasl-read "incompatible fasl-object machine-type ~s found in ~s"
+               ($oops who "incompatible fasl-object machine-type ~s found in ~s"
                  (cdr a) p))]
-            [else (malformed p)])))
+            [else (malformed p "unrecognized machine type")])))
       (unless (and (eqv? (get-u8 p) (char->integer #\()) ;)
                    (let f ()
                      (let ([n (get-u8 p)])
                        (and (not (eof-object? n)) ;(
                             (or (eqv? n (char->integer #\))) (f))))))
-        (malformed p)))
-    (lambda (p)
+        (malformed p "invalid list of base boot files")))
+    (define (go p situation)
+      (define (go1)
+        (if (and ($port-flags-set? p (constant port-flag-file))
+                 (or (not ($port-flags-set? p (constant port-flag-compressed)))
+                     (begin ($compressed-warning who p) #f))
+                 (eqv? (binary-port-input-count p) 0))
+            ($fasl-read ($port-info p) situation (port-name p))
+            (let fasl-entry ()
+              (let ([ty (get-u8 p)])
+                (cond
+                  [(eof-object? ty) ty]
+                  [(eqv? ty (constant fasl-type-header))
+                   (check-header p)
+                   (fasl-entry)]
+                  [(eqv? ty (constant fasl-type-visit))
+                   (go2 (eqv? situation (constant fasl-type-revisit)))]
+                  [(eqv? ty (constant fasl-type-revisit))
+                   (go2 (eqv? situation (constant fasl-type-visit)))]
+                  [(eqv? ty (constant fasl-type-visit-revisit))
+                   (go2 #f)]
+                  [else (malformed p "invalid situation")])))))
+      (define (go2 skip?)
+        (let ([n (get-uptr p)])
+          (if skip?
+              (begin
+                (if (and (port-has-port-position? p) (port-has-set-port-position!? p))
+                    (set-port-position! p (+ (port-position p) n))
+                    (get-bytevector-n p n))
+                (go1))
+              (let ([compressed-flag (get-u8 p)])
+                (cond
+                  [(or (eqv? compressed-flag (constant fasl-type-gzip)) (eqv? compressed-flag (constant fasl-type-lz4)))
+                   (let-values ([(dest-size dest-size-bytes) (get-uptr/bytes p)])
+                     (let* ([src-size (- n 1 dest-size-bytes)]
+                            [bv (get-bytevector-n p src-size)]
+                            [bv ($bytevector-uncompress bv dest-size
+                                  (if (eqv? compressed-flag (constant fasl-type-gzip))
+                                      (constant COMPRESS-GZIP)
+                                      (constant COMPRESS-LZ4)))])
+                       ($bv-fasl-read bv (port-name p))))]
+                  [(eqv? compressed-flag (constant fasl-type-uncompressed))
+                   ($bv-fasl-read (get-bytevector-n p (- n 1)) (port-name p))]
+                  [else (malformed p "invalid compression")])))))
       (unless (and (input-port? p) (binary-port? p))
-        ($oops 'fasl-read "~s is not a binary input port" p))
-      (if (and ($port-flags-set? p (constant port-flag-file))
-               (eqv? (binary-port-input-count p) 0))
-          ($fasl-read ($port-info p)
-            ($port-flags-set? p (constant port-flag-compressed))
-            (port-name p))
-          (let fasl-entry ()
-            (let ([ty (get-u8 p)])
-              (cond
-                [(eof-object? ty) ty]
-                [(eqv? ty (constant fasl-type-header))
-                 (check-header p)
-                 (fasl-entry)]
-                [(eqv? ty (constant fasl-type-fasl-size))
-                 ($bv-fasl-read (get-bytevector-n p (get-uptr p)) (port-name p))]
-                [else (malformed p)])))))))
+        ($oops who "~s is not a binary input port" p))
+      (go1))
+    (case-lambda
+      [(p) (go p (constant fasl-type-visit-revisit))]
+      [(p situation)
+       (go p
+         (case situation
+           [(visit) (constant fasl-type-visit)]
+           [(revisit) (constant fasl-type-revisit)]
+           [(load) (constant fasl-type-visit-revisit)]
+           [else ($oops who "invalid situation ~s" situation)]))])))
 
 (define ($compiled-file-header? ip)
   (let ([pos (port-position ip)])
@@ -184,39 +235,34 @@
 
 (let ()
   (define do-load-binary
-    (lambda (who fn ip situation for-import?)
-      (module (Lexpand? visit-stuff? visit-stuff-inner revisit-stuff? revisit-stuff-inner
-               recompile-info? library/ct-info? library/rt-info? program-info?)
-        (import (nanopass))
-        (include "base-lang.ss")
-        (include "expand-lang.ss"))
-      (define unexpected-value!
-        (lambda (x)
-          ($oops who "unexpected value ~s read from ~a" x fn)))
-      (let loop ()
-        (let ([x (fasl-read ip)])
-          (define run-inner
-            (lambda (x)
-              (cond
-                [(procedure? x) (x)]
-                [(library/rt-info? x) ($install-library/rt-desc x for-import? fn)]
-                [(library/ct-info? x) ($install-library/ct-desc x for-import? fn)]
-                [(program-info? x) ($install-program-desc x)]
-                [else (unexpected-value! x)])))
-          (define run-outer
-            (lambda (x)
-              (cond
-                [(recompile-info? x) (void)]
-                [(revisit-stuff? x) (when (memq situation '(load revisit)) (run-inner (revisit-stuff-inner x)))]
-                [(visit-stuff? x) (when (memq situation '(load visit)) (run-inner (visit-stuff-inner x)))]
-                [else (run-inner x)])))
-          (cond
-            [(eof-object? x) (close-port ip)]
-            [(vector? x) (vector-for-each run-outer x) (loop)]
-            [(Lexpand? x) ($interpret-backend x situation for-import? fn) (loop)]
-            [else (run-outer x) (loop)])))))
+    (lambda (who fn ip situation for-import? importer)
+      (let ([load-binary (make-load-binary who fn situation for-import? importer)])
+        (let ([x (fasl-read ip situation)])
+          (unless (eof-object? x)
+            (let loop ([x x])
+              (let ([next-x (fasl-read ip situation)])
+                (if (eof-object? next-x)
+                    (load-binary x)
+                    (begin (load-binary x) (loop next-x))))))))))
 
-  (define (do-load who fn situation for-import? ksrc)
+  (define (make-load-binary who fn situation for-import? importer)
+    (module (Lexpand? recompile-info? library/ct-info? library/rt-info? program-info?)
+      (import (nanopass))
+      (include "base-lang.ss")
+      (include "expand-lang.ss"))
+    (lambda (x)
+      (cond
+        [(procedure? x) (x)]
+        [(library/rt-info? x) ($install-library/rt-desc x for-import? importer fn)]
+        [(library/ct-info? x) ($install-library/ct-desc x for-import? importer fn)]
+        [(program-info? x) ($install-program-desc x)]
+        [(recompile-info? x) (void)]
+        [(Lexpand? x) ($interpret-backend x situation for-import? importer fn)]
+        ; NB: this is here to support the #t inserted by compile-file-help2 after header information
+        [(eq? x #t) (void)]
+        [else ($oops who "unexpected value ~s read from ~a" x fn)])))
+
+  (define (do-load who fn situation for-import? importer ksrc)
     (let ([ip ($open-file-input-port who fn)])
       (on-reset (close-port ip)
         (let ([fp (let ([start-pos (port-position ip)])
@@ -232,13 +278,14 @@
                                       fp
                                       (loop fp))))))
                         (begin (set-port-position! ip start-pos) 0)))])
-          (port-file-compressed! ip)
           (if ($compiled-file-header? ip)
-              (do-load-binary who fn ip situation for-import?)
               (begin
-                (when ($port-flags-set? ip (constant port-flag-compressed))
-                  ($oops who "missing header for compiled file ~s" fn))
-                (unless ksrc ($oops who "~a is not a compiled file" fn))
+                (do-load-binary who fn ip situation for-import? importer)
+                (close-port ip))
+              (begin
+                (unless ksrc
+                  (close-port ip)
+                  ($oops who "~a is not a compiled file" fn))
                 (unless (eqv? fp 0) (set-port-position! ip 0))
                 (let ([sfd ($source-file-descriptor fn ip (eqv? fp 0))])
                   (unless (eqv? fp 0) (set-port-position! ip fp))
@@ -246,15 +293,38 @@
                   (set! ip (transcoded-port ip (current-transcoder)))
                   (ksrc ip sfd ($make-read ip sfd fp)))))))))
 
+  (set! $make-load-binary
+    (lambda (fn)
+      (make-load-binary '$make-load-binary fn 'load #f #f)))
+
+  (set-who! load-compiled-from-port
+    (lambda (ip)
+      (unless (and (input-port? ip) (binary-port? ip))
+        ($oops who "~s is not a binary input port" ip))
+      (do-load-binary who (port-name ip) ip 'load #f #f)))
+
+  (set-who! visit-compiled-from-port
+    (lambda (ip)
+      (unless (and (input-port? ip) (binary-port? ip))
+        ($oops who "~s is not a binary input port" ip))
+      (do-load-binary who (port-name ip) ip 'visit #f #f)))
+
+  (set-who! revisit-compiled-from-port
+    (lambda (ip)
+      (unless (and (input-port? ip) (binary-port? ip))
+        ($oops who "~s is not a binary input port" ip))
+      (do-load-binary who (port-name ip) ip 'revisit #f #f)))
+
   (set-who! load-program
     (rec load-program
       (case-lambda
         [(fn) (load-program fn eval)]
         [(fn ev)
+         (unless (string? fn) ($oops who "~s is not a string" fn))
          (unless (procedure? ev) ($oops who "~s is not a procedure" ev))
          (with-source-path who fn
            (lambda (fn)
-             (do-load who fn 'load #f
+             (do-load who fn 'load #f #f
                (lambda (ip sfd do-read)
                  ($set-port-flags! ip (constant port-flag-r6rs))
                  (let loop ([x* '()])
@@ -271,10 +341,11 @@
       (case-lambda
         [(fn) (load-library fn eval)]
         [(fn ev)
+         (unless (string? fn) ($oops who "~s is not a string" fn))
          (unless (procedure? ev) ($oops who "~s is not a procedure" ev))
          (with-source-path who fn
            (lambda (fn)
-             (do-load who fn 'load #f
+             (do-load who fn 'load #f #f
                (lambda (ip sfd do-read)
                  ($set-port-flags! ip (constant port-flag-r6rs))
                  (let loop ()
@@ -288,11 +359,11 @@
     ; like load, but sets #!r6rs mode and does not use with-source-path,
     ; since syntax.ss load-library has already determined the path.
     ; adds fn's directory to source-directories
-    (lambda (fn situation)
+    (lambda (fn situation importer)
       (define who 'import)
       (let ([fn (let ([host-fn (format "~a.~s" (path-root fn) (machine-type))])
                   (if (file-exists? host-fn) host-fn fn))])
-        (do-load who fn situation #t
+        (do-load who fn situation #t importer
           (lambda (ip sfd do-read)
             ($set-port-flags! ip (constant port-flag-r6rs))
             (parameterize ([source-directories (cons (path-parent fn) (source-directories))])
@@ -308,10 +379,11 @@
       (case-lambda
         [(fn) (load fn eval)]
         [(fn ev)
+         (unless (string? fn) ($oops who "~s is not a string" fn))
          (unless (procedure? ev) ($oops who "~s is not a procedure" ev))
          (with-source-path who fn
            (lambda (fn)
-             (do-load who fn 'load #f
+             (do-load who fn 'load #f #f
                (lambda (ip sfd do-read)
                  (let loop ()
                    (let ([x (do-read)])
@@ -321,20 +393,20 @@
                  (close-port ip)))))])))
 
   (set! $visit
-    (lambda (who fn)
-      (do-load who fn 'visit #t #f)))
+    (lambda (who fn importer)
+      (do-load who fn 'visit #t importer #f)))
 
   (set! $revisit
-    (lambda (who fn)
-      (do-load who fn 'revisit #t #f)))
+    (lambda (who fn importer)
+      (do-load who fn 'revisit #t importer #f)))
 
   (set-who! visit
     (lambda (fn)
-      (do-load who fn 'visit #f #f)))
+      (do-load who fn 'visit #f #f #f)))
 
   (set-who! revisit
     (lambda (fn)
-      (do-load who fn 'revisit #f #f))))
+      (do-load who fn 'revisit #f #f #f))))
 
 (let ()
   (module sstats-record (make-sstats sstats? sstats-cpu sstats-real
@@ -631,7 +703,7 @@
 
 (define $scheme-greeting
   (lambda ()
-    (format "~a\nCopyright 1984-2017 Cisco Systems, Inc.\n"
+    (format "~a\nCopyright 1984-2019 Cisco Systems, Inc.\n"
       (scheme-version))))
 
 (define $session-key #f)
@@ -749,6 +821,12 @@
                    (or (eqv? gtarget g) (eqv? gtarget (fx+ g 1))))
          ($oops who "invalid target generation ~s for generation ~s" gtarget g))
        (collect2 g (if (eq? gtarget 'static) (constant static-generation) gtarget))])))
+
+(set! collect-rendezvous
+  (let ([fire-collector (foreign-procedure "(cs)fire_collector" () void)])
+    (lambda ()
+      (fire-collector)
+      ($collect-rendezvous))))
 
 (set! keyboard-interrupt-handler
    ($make-thread-parameter
@@ -1323,7 +1401,7 @@
 
   (set! $pass-stats
     (lambda ()
-      (let-values ([(namev psv) (with-tc-mutex (hashtable-entries stats-ht))])
+      (define (build-result namev psv)
         (vector->list
           (vector-map
             (lambda (name ps) 
@@ -1333,7 +1411,23 @@
                 (pass-stats-gc-cpu ps)
                 (pass-stats-bytes ps)))
             namev
-            psv)))))
+            psv)))
+      (with-tc-mutex
+        (if outer-ps
+            (let ([cpu (current-time 'time-thread)]
+                  [gc-cpu (current-time 'time-collector-cpu)]
+                  [bytes (+ (bytes-deallocated) (bytes-allocated))])
+              (set-time-type! cpu 'time-duration)
+              (set-time-type! gc-cpu 'time-duration)
+              (pass-stats-cpu-set! outer-ps (add-duration (pass-stats-cpu outer-ps) cpu))
+              (pass-stats-gc-cpu-set! outer-ps (add-duration (pass-stats-gc-cpu outer-ps) gc-cpu))
+              (pass-stats-bytes-set! outer-ps (+ (pass-stats-bytes outer-ps) bytes))
+              (let ([result (call-with-values (lambda () (hashtable-entries stats-ht)) build-result)])
+                (pass-stats-cpu-set! outer-ps (subtract-duration (pass-stats-cpu outer-ps) cpu))
+                (pass-stats-gc-cpu-set! outer-ps (subtract-duration (pass-stats-gc-cpu outer-ps) gc-cpu))
+                (pass-stats-bytes-set! outer-ps (- (pass-stats-bytes outer-ps) bytes))
+                result))
+              (call-with-values (lambda () (hashtable-entries stats-ht)) build-result)))))
 
   (let ()
     (define who '$print-pass-stats)
@@ -1414,3 +1508,4 @@
         [() (print-pass-stats #f ($pass-stats))]
         [(key) (print-pass-stats key ($pass-stats))]
         [(key psl*) (print-pass-stats key psl*)]))))
+)

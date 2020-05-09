@@ -15,7 +15,7 @@
  */
 
 /* globals that do NOT need to be preserved in a saved heap.
- * they must be initalized each time the system is brought up. */
+ * they must be initialized each time the system is brought up. */
 
 /* gc.c */
 EXTERN IBOOL S_checkheap;
@@ -63,7 +63,7 @@ EXTERN ptr S_foreign_dynamic;
 #endif
 
 /* globals that do need to be preserved in a saved heap */
-EXTERN struct {
+EXTERN struct S_G_struct {
   /* scheme.c */
     double thread_context[size_tc / sizeof(double)];
     ptr active_threads_id;
@@ -73,6 +73,10 @@ EXTERN struct {
     ptr heap_reserve_ratio_id;
     IBOOL retain_static_relocation;
     IBOOL enable_object_counts;
+    ptr scheme_version_id;
+    ptr make_load_binary_id;
+    ptr load_binary;
+    ptr profile_counters;
 
   /* foreign.c */
     ptr foreign_static;
@@ -123,6 +127,7 @@ EXTERN struct {
     uptr countof_size[countof_types];
     ptr static_id;
     ptr countof_names;
+    IGEN prcgeneration;
 
   /* intern.c */
     iptr *oblist_length_pointer;

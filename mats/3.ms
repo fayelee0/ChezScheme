@@ -2049,6 +2049,44 @@
     (let ()
       (import $mrvs-double-call)
       (double-call 'a)))
+
+  ; regression testing for handling mvset in tail context
+  (call-with-values
+    (lambda ()
+      (call-with-values
+        (lambda ()
+          (+ (random 1) 7))
+        list))
+    (lambda l (equal? l '((7)))))
+
+  ; regression testing for handling mvset in predicate context
+  (if (call-with-values
+        (lambda ()
+          (call-with-values
+            (lambda ()
+              (+ (random 1) 7))
+            list))
+        (lambda l (equal? l '((7)))))
+      #t
+      #f)
+
+  ; regression test for handling mvcall with inline form
+  (equal?
+   '(result x)
+   (let ([bx (box #f)])
+     (define-record-type thing
+       (fields pos)
+       (nongenerative #{thing hlg584lmg5htbdauw7dkid2sh-0}))
+     (set-box! bx (make-thing 'x))
+     (let ([posx (unbox bx)])
+       (cons 'result
+             (call-with-values
+                 (lambda ()
+                   (if (thing? posx)
+                       ;; compiled as inline load:
+                       (thing-pos posx)
+                       (do-something-else)))
+               list)))))
 )
 
 (mat let-values

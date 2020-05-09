@@ -1,9 +1,9 @@
 \documentclass{releasenotes}
 
-\thisversion{Version 9.4.1}
+\thisversion{Version 9.5.3}
 \thatversion{Version 8.4}
-\pubmonth{March}
-\pubyear{2017}
+\pubmonth{February}
+\pubyear{2020}
 
 \begin{document}
 
@@ -58,17 +58,361 @@ Online versions of both books can be found at
 %-----------------------------------------------------------------------------
 \section{Functionality Changes}\label{section:functionality}
 
-\subsection{Record equality and hashing (9.4.1)}
+\subsection{Unicode Basic Multilingual Plane console I/O in Windows (9.5.3)}
 
-The new procedures \scheme{record-type-equal-procedure} and
+Console I/O now supports characters from the Unicode Basic
+Multilingual Plane in Windows. Windows consoles do not yet support the
+supplementary planes.
+
+\subsection{Incompatible fasl-format and compiled-file compression changes (9.5.3)}
+
+The fasl (fast-load) format now supports per-object compression.
+Whether the fasl writer actually performs compression is determined
+by the new \scheme{fasl-compressed} parameter, whose value defaults
+to \scheme{#t}.
+The compression format and level are determined by the
+\scheme{compress-format} and \scheme{compress-level}
+parameters.
+
+The \scheme{compile-compressed} parameter has been eliminated.
+Since compiled files are written in fasl format, the
+\scheme{fasl-compressed} parameter also now controls whether compiled
+files are compressed.
+
+Because individual portions of a fasl file are already compressed
+by default, attempting to compress a fasl file as a whole is often
+ineffective as well as inefficient both when writing and reading
+fasl objects.
+Thus, in particular, the \var{output-port} and \scheme{wpo-port}
+supplied to \scheme{compile-port} and \scheme{compile-to-port}
+should not be opened for compression.
+Similarly, external tools should not expect compiled files to be
+compressed as a whole, nor should they compress compiled files.
+
+Because compression of fasl files was previously encouraged and is
+now discouraged, the first attempt to write fasl data to or read
+fasl data from a compressed port will cause a warning to be issued,
+i.e., an exception with condition type \scheme{&warning} to be
+raised.
+
+The rationale for this change is to allow the fasl reader to seek
+past, without reading, portions of an object file that contain
+compile-time code at run time and run-time code at compile time.
+
+
+\subsection{Bytevector compression and compression level (9.5.3)}
+
+The procedure \scheme{bytevector-compress} now selects the level of
+compression based on the \scheme{compress-level} parameter.
+Prior to this it always used a default setting for compression.
+
+The \scheme{compress-level} parameter can now take on the new value
+\scheme{minimum} in addition to \scheme{low}, \scheme{medium},
+\scheme{high}, and \scheme{maximum}.
+
+\subsection{Combining object files (9.5.3)}
+
+In previous versions of Chez Scheme, multiple object files could
+be combined by concatinating them into a single file.  To support faster
+object file loading and loadability verification (described later in this
+document), recompile information and information about libraries and
+top-level programs within an object file is now placed at the top of the
+file.  The new \scheme{concatenate-object-files} procedure can be used to
+combine multiple object files while moving this information to the
+top of the combined file.
+
+\subsection{Explicitly invoking libraries (9.5.3)}
+
+The new procedure \scheme{invoke-library} can be used to force
+the evaluation of a library's body expressions (variable definition
+right-hand sides and initialization expresisons) before they might
+otherwise be needed.
+It is generally useful only for libraries whose body expressions
+have side effects.
+
+\subsection{Verifying loadability of libraries and programs (9.5.3)}
+
+The new procedure \scheme{verify-loadability} can be used to
+determine, without actually loading any object code or defining any
+libraries, whether a set of object files and the object files
+satisfying their library dependencies, direct or indirect, are
+present, readable, and mutually compatible.
+
+To support loadability verification, information about libraries
+and top-level programs within an object file is now placed at the
+top of the file, just after recompile information.  This change can
+be detected by unusual setups, e.g., a source file that interleaves
+library definitions and top-level forms that call library-list, but
+is backward compatible for standard use cases in which each file
+contains one or more libraries possibly followed by a top-level
+program.
+
+\subsection{Unregistering objects from guardians (9.5.3)}
+
+The set of as-yet unresurrected objects registered with a guardian
+can be unregistered and retrieved by means of the new primitive
+\scheme{unregister-guardian}.
+Consult the user's guide for usage and caveats.
+Guardians can now be distinguished from other procedures (and other
+objects) via the new primitive \scheme{guardian?}.
+
+\subsection{Coverage support and source tables (9.5.3)}
+
+When the new parameter \scheme{generate-covin-files} is set to \scheme{#t}
+rather than the default \scheme{#f}, file compilation routines such as
+\scheme{compile-file} and \scheme{compile-library} produce coverage
+information (\scheme{.covin}) files that can be used in conjunction with
+profile information to measure coverage of a source-code base.
+Coverage information is also written out when the optional \var{covop}
+argument is supplied to \scheme{compile-port} and \scheme{compile-to-port}.
+
+A covin file contains a printed representation of a \emph{source
+table} mapping each profiled source object in the code base to a
+count of zero.
+Source tables generally associate source objects with arbitrary values
+and are allocated and manipulated with hashtable-like operations specific
+to source tables.
+
+Profile information can be tracked even through releasing and clearing
+of profile counters via the new procedure \scheme{with-profile-tracker},
+which produces a source table.
+
+Coverage of a source-code base can thus be achieved by comparing
+the set of source objects in the covin-file source tables for one
+or more source files with the set of source objects in the source
+tables produced by one or more runs of tests run with profile
+information tracked by \scheme{with-profile-tracker}.
+
+\subsection{Importing a library from an object file now visits the file (9.5.3)}
+
+As described in Section~\ref{sec:faster-object-file-loading},
+importing a library from an object file now causes the object file
+to be visited rather than fully loaded.
+If the run-time information is needed, i.e., if the library is
+invoked, the file will be revisited.
+This is typically transparent to the program, but problems can arise
+if the program changes its current directory (via
+\scheme{current-directory}) prior to invoking a library, and the
+object file cannot be found.
+
+\subsection{Recompile information (9.5.3)}
+
+As described in Section~\ref{sec:faster-object-file-loading}, all
+recompile information is now placed at the front of each object
+file where it can be read without the need to scan through the
+remainder of the file.
+Because the library manager expects to find recompile information
+at the front of an object file, it will not find all recompile
+information if object files are concatenated together via some
+mechanism other than then new \scheme{concatenate-object-files}
+procedure.
+
+Also, the compiler has to hold in memory the object code for all
+expressions in a file so that it can emit the unified recompile
+information, rather than writing to the object file incrementally,
+which can significantly increase the memory required to compile a
+large file full of individual top-level forms.
+This does not affect top-level programs, which were already handled
+as a whole, or a typical library file that contains just a single
+library form.
+
+\subsection{Optional new \protect\scheme{fasl-read} situation argument (9.5.3)}
+
+It is now possible to direct \scheme{fasl-read} to read only visit
+(compile-time) or revisit (run-time) objects via the optional new
+situation argument.
+Situation \scheme{visit} causes the fasl reader to skip over
+revisit (run-time-only) objects, while
+\scheme{revisit} causes the fasl reader to skip over
+visit (compile-time-only) objects.
+Situation \scheme{load} doesn't skip over any objects.
+
+\subsection{Optional \protect\scheme{read-token} \protect\var{sfd} and \protect\var{bfp} arguments (9.5.3)}
+
+In addition to the optional input-port argument, \scheme{read-token} now takes
+optional \var{sfd} (source-file-descriptor) and \var{bfp} (beginning-file-position)
+arguments.
+If either is provided, both must be provided.
+Specifying \var{sfd} and \var{bfp} improves the quality of error messages,
+guarantees the \scheme{read-token} \var{start} and \var{end} return values can be determined,
+and eliminates the overhead of asking for a file position on each call
+to \scheme{read-token}.
+\var{bfp} is normally 0 for the first call
+to \scheme{read-token} at the start of a file,
+and the \var{end} return value of the preceding
+call for each subsequent call.
+
+\subsection{Compression format and level (9.5.3)}
+
+Support for LZ4 compression has been added.
+LZ4 is now the default format when compressing files (including
+object files produced by the compiler) and bytevectors, while {\tt
+gzip} is still supported and can be enabled by setting
+the new \scheme{compress-format} parameter to the symbol \scheme{gzip} instead of the
+default \scheme{lz4}.  Reading in compressed mode
+infers the format, so reading {\tt gzip}-compressed files will still
+work without changing \scheme{compress-format}.  Reading LZ4-format
+files tends to be much faster than reading {\tt gzip}-format files,
+while {\tt gzip}-compressed files tend to be smaller.
+In particular, object files created by the compiler now tend to be
+larger but load more quickly.
+
+The new \scheme{compress-level} parameter can be used to control
+the amount of time spent on file compression (but not
+bytevector compression).
+It can be set to one of the symbols \scheme{low},
+\scheme{medium}, \scheme{high}, and \scheme{maximum}, which are
+listed in order from shortest to longest compression time and least
+to greatest effectiveness.
+The default value is \scheme{medium}.
+
+\subsection{Mutexes and condition variables can have names (9.5.3)}
+
+The procedures \scheme{make-mutex} and \scheme{make-condition} now
+accept an optional argument \scheme{name}, which must be a symbol
+that identifies the object or \scheme{f} for no name. The name is
+printed every time the mutex or condition object is printed, which
+is useful for debugging.
+
+\subsection{Improved packaging support (9.5.1)}
+
+The Chez Scheme \scheme{Makefile} has been enhanced with new targets for
+creating binary packages for Unix-like operating systems.
+The \scheme{create-tarball} target generates a binary tarball package for
+distribution, the \scheme{create-rpm} target generates a Linux RPM package, and
+the \scheme{create-pkg} target generates a macOS package file.
+
+\subsection{Library search handler (9.5.1)}
+
+The new \scheme{library-search-handler} parameter controls how library source
+or object code is located when \scheme{import}, \scheme{compile-whole-program},
+or \scheme{compile-whole-library} are used to load a library.
+The value of the \scheme{library-search-handler} parameter must be a procedure
+expecting four arguments: the \var{who} argument is a symbol that provides
+context in \scheme{import-notify} messages, the \var{library} argument is the
+name of the desired library, the \var{directories} is a list of source and
+object directory pairs in the form returned by \scheme{library-directories},
+and the \var{extensions} parameter is a list of source and object extension
+pairs in the form returned by \scheme{library-extensions}.
+The default vaue of the \scheme{library-search-handler} is the newly exposed
+\scheme{default-library-search-handler} procedure.
+
+\subsection{Ftype guardians (9.5.1)}
+
+Applications that manage memory outside the Scheme heap can leverage
+new support for ftype guardians to help perform reference counting.
+An ftype guardian is like an ordinary guardian except that it does
+not necessarily save from collection each ftype pointer registered
+with it but instead decrements (atomically) a reference count at
+the head of the object to which the ftype pointer points.
+If the reference count becomes zero as a result of the decrement,
+it preserves the object so that it can be retrieved from the guardian
+and freed; otherwise it allows it to be collected.
+
+\subsection{Recompile information and whole-program optimization (9.5.1)}
+
+\scheme{compile-whole-program} and \scheme{compile-whole-library}
+now propagate recompile information from the named \scheme{wpo}
+file to the object file to support \scheme{maybe-compile-program}
+and \scheme{maybe-compile-library} in the case where the new object
+file overwrites the original object file.
+
+\subsection{Directly accessing the value of compile-time values (9.5.1)}
+
+The value of a compile-time value created by \scheme{make-compile-time-value}
+can be retrieved via the new procedure \scheme{compile-time-value-value}.
+The new predicate \scheme{compile-time-value?} can be used to determine if
+an object is a compile-time value.
+
+\subsection{Extracting a subset of hashtable entries (9.5.1)}
+
+The new \scheme{hashtable-cells} function is similar to
+\scheme{hashtable-entries}, but it returns a vector of cells instead
+of two vectors. An optional argument to \scheme{hashtable-keys},
+\scheme{hashtable-values}, \scheme{hashtable-entries}, or \scheme{hashtable-cells}
+limits the size of the result vector.
+
+\subsection{Profile data retained for reclaimed code (9.5.1)}
+
+Profile data is now retained indefinitely even for code objects
+that have been reclaimed by the garbage collector.
+Previously, the counters holding the data were reclaimed by the
+collector along with the code objects.
+This makes profile output more complete and accurate, but it does
+represent a potential space leak in programs that create or load
+and release code dynamically.
+Such programs can avoid the potential space leak by releasing the
+counters explicitly via the new procedure
+\scheme{profile-release-counters}.
+
+\subsection{Procedure source location without inspector information (9.5.1)}
+
+When \scheme{generate-inspector-information} is set to \scheme{#f} and
+\scheme{generate-procedure-source-information} is set to \scheme{#t},
+source location information is preserved for a procedure, even though
+other inspector information is not preserved.
+
+\subsection{Atomic compare-and-set (9.5.1)}
+
+The new procedures \scheme{box-cas!} and \scheme{vector-cas!}
+atomically update a box or vector with a given new value when the
+current content is \scheme{eq?} to a given old value. Atomicity is
+guaranteed even if multiple threads attempt to update the same box or
+vector.
+
+\subsection{Foreign-procedure thread activation (9.5.1)}
+
+A new \scheme{__collect_safe} foreign-procedure convention, which can
+be combined with other conventions, causes a foreign-procedure call to
+deactive the current thread during the call so that other threads can
+perform a garbage collection. Similarly, the \scheme{__collect_safe}
+convention modifier for callables causes the current thread to be
+activated on entry to the callable, and the activation state is
+reverted on exit from the callable; this activation makes callables
+work from threads that are otherwise unknown to the Scheme system.
+
+\subsection{Garbage collection and threads (9.5.1)}
+
+A new \scheme{collect-rendezvous} function performs a garbage
+collection in the same way as when the system determines that a
+collection should occur. For many purposes,
+\scheme{collect-rendezvous} is a variant of \scheme{collect} that
+works when multiple threads are active. More precisely, the
+\scheme{collect-rendezvous} function invokes the collect-request
+handler (in an unspecified thread) after synchronizing all active
+threads and temporarily deactivating all but the one used to call the
+collect-request handler.
+
+\subsection{Foreign-procedure struct arguments and results (9.5.1)}
+
+A new \scheme{(& \var{ftype})} form allows a struct or union to be
+passed between Scheme and a foreign procedure. The Scheme-side
+representation of a \scheme{(& \var{ftype})} argument is the
+same as a \scheme{(* \var{ftype})} argument, but where
+\scheme{(& \var{ftype})} passes an address between the Scheme and C
+worlds, \scheme{(& \var{ftype})} passes a copy of the data at the
+address. When \scheme{(& \var{ftype})} is used as a result type,
+an extra \scheme{(* \var{ftype})} argument must be provided to receive
+the copied result, and the directly returned result is unspecified.
+
+\subsection{Record equality and hashing (9.5, 9.5.1)}
+
+Several new procedures and parameters allow a program to control what
+\scheme{equal?} and \scheme{equal-hash} do when applied
+to structures containing record instances.
+The procedures \scheme{record-type-equal-procedure} and
 \scheme{record-type-hash-procedure} can be used to customize the
-handling of records by \scheme{equal?} and \scheme{hash}, and
-the new procedures \scheme{record-equal-procedure} and
+handling of records of specific types by \scheme{equal?} and \scheme{hash}, and
+the procedures \scheme{record-equal-procedure} and
 \scheme{record-hash-procedure} can be used to look up the
 applicable (possibly inherited) equality and hashing procedures
 for specific record instances.
+The parameters \scheme{default-record-equal-procedure} and
+\scheme{default-record-hash-procedure} can be used to control
+the default behavior when comparing or hashing records without
+type-specific equality and hashing procedures.
 
-\subsection{Immutable vectors, fxvectors, bytevectors, strings, and boxes (9.4.1)}
+\subsection{Immutable vectors, fxvectors, bytevectors, strings, and boxes (9.5)}
 
 Support for immutable vectors, fxvectors, bytevectors, strings, and boxes
 has been added.
@@ -78,7 +422,7 @@ procedures.
 Immutable boxes are created via \scheme{box-immutable}.
 Any attempt to modify an immutable object causes an exception to be raised.
 
-\subsection{Ephemeron pairs and hashtables (9.4.1)}
+\subsection{Ephemeron pairs and hashtables (9.5)}
 
 Support for ephemeron pairs has been added, along with eq and eqv
 hashtables that use ephemeron pairs to combine keys and values. An
@@ -91,7 +435,7 @@ the pair have been found reachable. An ephemeron hashtable implements
 a weak mapping where referencing a key in a value does not prevent the
 mapping from being removed from the table.
 
-\subsection{Optional timeout for \protect\scheme{condition-wait} (9.4.1)}
+\subsection{Optional timeout for \protect\scheme{condition-wait} (9.5)}
 
 The \scheme{condition-wait} procedure now takes an optional
 \var{timeout} argument and returns a boolean indicating whether the
@@ -100,7 +444,7 @@ thread was awakened by the condition before the timeout. The
 \scheme{time-utc}, or it can be \scheme{#f} for no timeout (the
 default).
 
-\subsection{\protect\scheme{date-dst?} and \protect\scheme{date-zone-name} (9.4.1)}
+\subsection{\protect\scheme{date-dst?} and \protect\scheme{date-zone-name} (9.5)}
 
 The new primitive procedures \scheme{date-dst?} and
 \scheme{date-zone-name} access time-zone information for a
@@ -108,7 +452,7 @@ The new primitive procedures \scheme{date-dst?} and
 zone offset. The zone-offset argument to \scheme{make-date}
 is now optional.
 
-\subsection{\protect\scheme{procedure-arity-mask} (9.4.1)}
+\subsection{\protect\scheme{procedure-arity-mask} (9.5)}
 
 The new primitive procedure \scheme{procedure-arity-mask} takes a
 procedure \var{p} and returns a two's complement bitmask representing
@@ -118,14 +462,14 @@ For example, the arity mask for a two-argument procedure such as
 while the arity mask for a procedure that accepts one or more arguments,
 such as \var{list*}, is $-2$ (all but bit 0 set).
 
-\subsection{Bytevector compression (9.4.1)}
+\subsection{Bytevector compression (9.5)}
 
 The new primitive procedures \scheme{bytevector-compress} and
 \scheme{bytevector-decompress} exposes for bytevectors the kind of
 compression functionality that is used for files with the
 \scheme{compressed} option.
 
-\subsection{Line caching and source objects (9.4.1)}
+\subsection{Line caching and source objects (9.5)}
 
 The \scheme{locate-source} function accepts an optional argument that
 enables the use of a cache for line information, so that a source file
@@ -142,24 +486,24 @@ error reporting, instead of calling \scheme{locate-source} or
 \scheme{locate-source-object-source} directly, so that just-in-time
 source-location lookup can be adjusted, too.
 
-\subsection{High-precision clock time in Windows 8 and up (9.4.1)}
+\subsection{High-precision clock time in Windows 8 and up (9.5)}
 
 When running on Windows 8 and up, Chez Scheme uses the high-precision
 clock time function for the current date and time.
 
-\subsection{Printing of non-standard (extended) identifiers (9.4.1)}
+\subsection{Printing of non-standard (extended) identifiers (9.5)}
 
 Chez Scheme extends the syntax of identifiers as described in the
 introduction to the Chez Scheme User's Guide, except within forms prefixed
 by \scheme{#!r6rs}, which is implied by in a library or top-level program.
-Prior to Version~9.4.1, the printer always printed such identifiers using
+Prior to Version~9.5, the printer always printed such identifiers using
 hex scalar value escapes as necessary to render them with valid R6RS identifier syntax.
 When the new parameter \scheme{print-extended-identifiers} is set
 to \scheme{#t}, these identifiers are printed without escapes, e.g.,
 \scheme{1+} prints as \scheme{1+} rather than as \scheme{\x31;+}.
 The default value of this parameter is \scheme{#f}.
 
-\subsection{Expression-editor Unicode support (9.4.1)}
+\subsection{Expression-editor Unicode support (9.5)}
 
 The expression editor now supports Unicode characters under Linux and MacOS~X
 except that combining characters are not treated correctly for
@@ -1535,38 +1879,271 @@ in fasl files does not generally make sense.
 %-----------------------------------------------------------------------------
 \section{Bug Fixes}\label{section:bugfixes}
 
-\subsection{Invalid memory references involving complex numbers (9.4.1)} 
+\subsection{Buffering signals (9.5.3)}
+
+Prior to this release, only one unhandled signal was buffered for
+any signal for which a handler has been registered via
+\scheme{register-signal-handler}, so two signals delivered in
+quick succession could be see as only one.
+The system now buffers a much larger number (63 in this release) of
+signals, and the fact that signals can be dropped has now been
+documented.
+
+\subsection{Clear-output bug (9.5.3)}
+
+A bug has been fixed in which a call to \scheme{clear-output-port}
+on a port could lead to unexpected behavior involving the port,
+including loss of buffering or suppression of future output to the
+port.
+
+\subsection{Various argument type-error issues (9.5.3)}
+
+A variety of primitive argument type-checking issues have been
+fixed, including missing checks, misleading error messages,
+and checks made later than appropriate, i.e., after the primitive
+has already had side effects.
+
+\subsection{\protect\scheme{__collect_safe}, x86\_64, and floating-point arguments or results (9.5.3)}
+
+The \scheme{__collect_safe} mode for a foreign call or callable now
+correctly preserves floating-point registers used for arguments or
+results while activating or deactivating a thread on x86\_64.
+
+\subsection{\protect\scheme{putenv} memory leak (9.5.3)}
+
+\scheme{putenv} now calls the host system's \scheme{setenv} instead of
+\scheme{putenv} on non-Windows hosts and avoids allocating memory that
+is never freed, although \scheme{setenv} might do so.
+
+\subsection{String ports from immutable strings (9.5.4)}
+
+A bug that miscalculated the buffer size for
+\scheme{open-string-input-port} given an immutable string has been
+fixed.
+
+\subsection{Multiplying $-2^{30}$ with itself on 64-bit platforms (9.5.3)}
+
+A bug that produced the wrong sign when multiplying $-2^{30}$ with
+itself on 64-bit platforms has been fixed.
+
+\subsection{Compiler dropping affects from record-accessor calls (9.5.3)}
+
+A bug that could cause the source optimizer to drop effects within
+the argument of a record-accessor call has been fixed.
+
+\subsection{Welcome text in macOS package file (9.5.2)}
+
+The welcome text and copyright year in the macOS package file was
+corrected.
+
+\subsection{Fasl representation change for recursive ftypes (9.5.2)}
+
+A bug in the reading of mutually recursive ftype definitions from
+compiled files has been fixed.
+The bug was triggered by recursive ftype definitions in which one
+of the mutually recursive ftypes is a subtype of another, as in:
+
+\schemedisplay
+(define-ftype
+  [A (* B)]
+  [B (struct [h A])]))
+\endschemedisplay
+
+It manifested in the fasl reader raising bogus "incompatible record
+type" exceptions when two or more references to one of the ftypes
+occur in in separate compiled files or in separate top-level forms
+of a file compiled via \scheme{compile-file}.
+The bug could also have affected other record-type descriptors with
+cycles involving parent rtds and ``extra'' fields as well as fasl
+output created via \scheme{fasl-write}.
+
+\subsection{Unbound object resulting from libraries combined with \protect\scheme{compile-whole-library} (9.5.1)}
+
+A bug in \scheme{compile-whole-library} that allowed the invoke code for a
+library included in the combined library body to be executed without first
+invoking its binary library dependencies has been fixed.
+This bug could arise when a member of a combined library was invoked without
+invoking the requirements of the other libraries it was combined with.  For
+instance, consider the case where libraries \scheme{(A)} and \scheme{(B)} are
+combined and \scheme{(B)} has dependencies on library \scheme{(A)} and binary
+library \scheme{(C)}.
+One possible sort order of this graph is \scheme{(C)}, \scheme{(A)},
+\scheme{(B)}, where the invoke code for \scheme{(A)} and \scheme{(B)} are
+combined into a single block of invoke code.  If library \scheme{(A)} is
+invoked first, it will implicitly cause the invoke code for \scheme{(B)} to be
+invoked without invoking the code for \scheme{(C)}.
+We address this by adding explicit dependencies between \scheme{(A)} and all
+the binary libraries that precede it and all of the other libraries clustered
+with \scheme{(A)} and \scheme{(A)}, such that no matter which library clustered
+with \scheme{(A)} is invoked firts, \scheme{(A)} will be invoked, causing all
+binary libraries that precede \scheme{(A)} to be invoked.
+It is also possible for a similar problem to exist between clusters, where
+invoking a later cluster may invoke an earlier cluster without invoking the
+binary dependencies for the earlier cluster.
+We address this issue by adding an invoke requirement between each cluster and
+the first library in the cluster that precedes it.
+These extended invoke requirements are also added to the import requirements
+for each library, and the dependency graph is enhanced with import requirement
+links to ensure these are taken into account during the topological sort.
+
+
+\subsection{Automatic recompilation and missing include files (9.5.1)}
+
+A bug in automatic recompilation involving missing include files
+has been fixed.
+The bug caused automatic recompilation to fail, often with an
+exception in \scheme{file-modification-time}, when a file specified
+by an absolute pathname or pathname starting with "./" or "../" was
+included via \scheme{include} during a previous compilation run and
+is no longer present.
+
+\subsection{Invalid memory reference instantiating \protect\scheme{foreign-callable} code object (9.5.1)}
+
+A bug that caused evaluation of a \scheme{foreign-callable} expression in
+code that has been collected into the static generation (e.g., when the
+\scheme{foreign-callable} form appears in code compiled to a boot file)
+to result in an invalid memory reference has been fixed.
+
+\subsection{Invalid constant-folding of some calls to \protect\scheme{apply} (9.5.1)}
+
+A bug in the source optimizer (cp0) allowed constant-folding of some calls to
+\scheme{apply} where the last argument is not known to be a list.  For example,
+cp0 incorrectly reduced
+\scheme{(apply zero? 0)} to \scheme{#t}
+and reduced
+\scheme{(lambda (x) (apply box? x) x)} to \scheme{(lambda (x) x)},
+but now preserves these calls to \scheme{apply} so that they may raise an
+exception.
+
+\subsection{Disk-relative filenames in Windows (9.5.1)}
+
+In Windows, filenames that start with a disk designator but no
+directory separator are now treated as relative paths. For example,
+\scheme{(path-absolute? "C:")} now returns \scheme{#f}, and
+\scheme{(directory-list "C:")} now lists the files in the current
+directory on disk C instead of the files in the root directory of disk
+C.
+
+In addition, \scheme{file-access-time}, \scheme{file-change-time},
+\scheme{file-directory?}, \scheme{file-exists?},
+\scheme{file-modification-time}, and \scheme{get-mode} no longer
+remove trailing directory separators on Windows.
+
+\subsection{Globally unique names on non-Windows systems no longer contain the IP address (9.5.1)}
+
+The globally unique names of gensyms no longer contain the IP address
+on non-Windows systems. Windows systems already used a universally
+unique identifier.
+
+\subsection{Invalid memory reference from \protect\scheme{fxvector} calls (9.5)}
+
+A compiler bug that could result in an invalid memory reference or
+some other unpleasant behavior for calls to \scheme{fxvector} in
+which the nested subexpression to compute the new value to be stored
+is nontrivial has been fixed.
+This bug could also affect calls to \scheme{vector-set-fixnum!} and possibly
+other primitive operations.
+
+\subsection{Incorrect return code when \protect\scheme{exit} is called with multiple arguments (9.5)}
+
+A bug in the implementation of the default exit handler with multiple
+values has been fixed.
+
+\subsection{Boot files containing compiled library code fail to load (9.5)}
+
+Compiled library code may now appear within fasl objects loaded during
+the boot process, provided that they are appended to the end of the base boot
+file or appear within a later boot file.
+
+\subsection{Misleading cyclic dependency error (9.5)}
+
+The library system no longer reports a cyclic dependency error
+during the second and subsequent attempts to visit or invoke a
+library after the first attempt fails for some reason other than
+an actual cyclic dependency.
+The fix also allows a library to be visited or invoked successfully
+on the second or subsequent attempt if the visit or invoke failed
+for a transient reason, such as a missing or incorrect version in
+an imported library.
+
+\subsection{Incomplete handling of import specs within standalone export forms (9.5)}
+
+A bug that limited the \scheme{(import \var{import-spec} \dots)} form within a
+standalone \scheme{export} form to \scheme{(import \var{import-spec})} has been
+fixed.
+
+\subsection{Permission denied after deleting files or directories in Windows (9.5)}
+
+In Windows, deleting a file or directory briefly leaves the file or
+directory in a state where a subsequent create operation fails with
+permission denied. This race condition is now mitigated.
+[This bug applies to all versions up to 9.5 on Windows 7 and later.]
+
+\subsection{Incorrect handling of offset in
+\protect\scheme{date->time-utc} on Windows (9.5)}
+
+A bug when \scheme{date->time-utc} is called on Windows with a
+date-zone-offset smaller than the system's time-zone offset has been
+fixed.
+[This bug dated back to Version 9.5.]
+
+\subsection{Compiler mishandling of fx /carry operations (9.5)}
+
+A bug in the source optimizer that caused an internal compiler error when
+folding certain calls to \scheme{fx+/carry}, \scheme{fx-/carry}, and
+\scheme{fx*/carry} has been fixed.
+[This bug dated back to Version 9.1.]
+
+\subsection{Compiler mishandling of nested \protect\scheme{call-with-values} calls (9.5)}
+
+A bug in that caused an internal compiler error when optimizing certain
+nested calls to \scheme{call-with-values} has been fixed.
+[This bug dated back to Version 8.9.1.]
+
+\subsection{Incorrect expansion of \protect\scheme{define-values} of no values (9.5)}
+
+A bug in the expansion of \scheme{define-values} that caused it to produce
+a non-definition form when used to define no values has been fixed.
+[This bug dated back to at least Version 8.4.]
+
+\subsection{Optimizer dropping \protect\scheme{pariah} forms (9.5)}
+
+A bug in the source optimizer that caused pariah forms to be ignored
+has been fixed.
+[This bug dated back to at least Version 9.3.1.]
+
+\subsection{Invalid memory references involving complex numbers (9.5)} 
 
 A bug on 64-bit platforms that occasionally caused invalid memory
 references when operating on inexact complex numbers or the imaginary parts
 of inexact complex numbers has been fixed.
 [This bug dated back to Version 8.9.1.]
 
-\subsection{Overflow detection for left-shift operations on fixnums (9.4.1)}
+\subsection{Overflow detection for left-shift operations on fixnums (9.5)}
 
 A bug that caused \scheme{fxsll}, \scheme{fxarithmetic-shift-left},
 and \scheme{fxarithmetic-shift} to fail to detect overflow in certain
 cases has been fixed.
 [This bug dated back to Version 4.0.]
 
-\subsection{Missing \protect\scheme{enum-set-indexer} argument check (9.4.1)}
+\subsection{Missing \protect\scheme{enum-set-indexer} argument check (9.5)}
 
 A missing argument check that resulted in the procedure returned by \scheme{enum-set-indexer}
 causing an invalid memory reference when passed a non-symbol argument has been fixed.
 [This bug dated back to Version 7.5.]
 
-\subsection{Storage for inaccessible mutexes and conditions is reclaimed (9.4.1)}
+\subsection{Storage for inaccessible mutexes and conditions is reclaimed (9.5)}
 
 The C heap storage for inaccessible mutexes and conditions is now reclaimed.
 [This bug dated back to Version 6.5.]
 
-\subsection{Missing guardian entries when a thread exits (9.4.1)}
+\subsection{Missing guardian entries when a thread exits (9.5)}
 
 A bug that caused guardian entries for a thread to be lost when a
 thread exits has been fixed.
 [This bug dated back to Version 6.5.]
 
-\subsection{Incorrect code for certain nested \protect\scheme{if} patterns (9.4.1)}
+\subsection{Incorrect code for certain nested \protect\scheme{if} patterns (9.5)}
 
 A bug in the source optimizer that produced incorrect code for certain
 nested \scheme{if} patterns has been fixed.
@@ -1585,7 +2162,7 @@ subexpression \scheme{(a)} evaluates to 0 and not when \scheme{(a)}
 evaluates to 1.
 [This bug dated back to Version 9.0.]
 
-\subsection{Leaked or unexpected \protect\scheme{cpvalid-defer} form (9.4.1)}
+\subsection{Leaked or unexpected \protect\scheme{cpvalid-defer} form (9.5)}
 
 A bug in the pass of the compiler that inserts valid checks for
 \scheme{letrec} and \scheme{letrec*} bindings has been fixed.
@@ -1734,6 +2311,99 @@ x86\_64 has been fixed.
 
 %-----------------------------------------------------------------------------
 \section{Performance Enhancements}\label{section:performance}
+
+\subsection{Special-cased basic arithmetic operations (9.5.3)}
+
+The basic arithmetic operations (addition, subtraction, multiplication,
+division) are now much faster when presented with certain special
+cases, e.g., multiplication of a large integer by 1 or -1 or addition
+of large integer and 0.
+
+\subsection{Faster right-shift of large integers (9.5.3)}
+
+Right shifting a large integer is now much faster in most cases
+where the shift count is a significant fraction of the number of
+bits in the large integer.
+
+\subsection{Faster object-file loading (9.5.3)}\label{sec:faster-object-file-loading}
+
+Visiting an object file (to obtain only compile-time information and
+code) and revisiting an object file (to obtain only run-time information
+and code) is now faster, because revisions to the fasl format, fasl
+writer, and fasl reader allow run-time code to be seeked past when
+visiting and compile-time code to be seeked past when revisiting.
+For compressed object files (the default), seeking still requires
+reading all of the data, but the cost of parsing the fasl format and
+building objects in the skipped portions is avoided, as are certain
+side effects, such as associating record type descriptors with their
+uids.
+
+Similarly, recompile information is now placed at the front of each
+object file where it can be loaded separately from
+the remainder of an object file without even seeking past the other
+portions of the file.
+Recompile information is used by \scheme{import} (when
+\scheme{compile-imported-libraries} is \scheme{#t}) and by maybe-compile
+routines such as \scheme{maybe-compile-program} to help determine
+whether recompilation is necessary.
+
+Importing a library from an object file now causes the object file
+to be visited rather than fully loaded.  (Libraries were already
+just revisited when required for their run-time code, e.g., when
+used from a top-level program.)
+
+Together these changes can significantly reduce compile-time and
+run-time overhead, particularly in applications that make use of
+a large number of libraries.
+
+\subsection{Faster \protect\scheme{profile-release-counters} (9.5.3)}
+
+\scheme{profile-release-counters} is now generation-friendly, meaning
+it does not incur any overhead for code objects in generations that
+have not been collected since the last call to\scheme{profile-release-counters}. 
+Also, it no longer allocates memory when counters are released.
+
+\subsection{Reduced cost for obtaining profile counts (9.5.3)}
+
+The cost of obtaining profile counts via \scheme{profile-dump} and
+other mechanisms has been reduced significantly.
+
+\subsection{Better code for \protect\scheme{bytevector} (9.5.1)}
+
+The compiler now generates better inline code for the \scheme{bytevector}
+procedure.
+Instead of one byte memory write for each argument, it writes up
+to four (32-bit machines) or eight (64-bit machines) bytes at a
+time, which almost always results in fewer instructions and fewer
+writes.
+
+\subsection{\protect\scheme{vector-for-each} and \protect\scheme{string-for-each} improvement (9.5.1)}
+
+The last call to the procedure passed to \scheme{vector-for-each}
+or \scheme{string-for-each} is now reliably implemented as tail
+call, as was already the case for \scheme{for-each}.
+
+\subsection{Lambda commonization (9.5.1)}
+
+After running the main source optimization pass (cp0), the
+compiler optionally runs a \emph{commonization} pass, which
+commonizes code for similar lambda expressions.
+The parameter \scheme{commonization-level} controls whether the
+commonization pass is run and, if so, how aggressive it is.
+The parameter's value must be a nonnegative exact integer ranging
+from 0 through 9.  When the parameter is set to 0, the default,
+commonization is not run.  Otherwise, higher values result in more
+commonization.
+
+\subsection{Improved compile times (9.5.1)}
+
+Compile times are now lower, sometimes by an order of magnitude or
+more, for procedures with thousands of parameters, local variables,
+and compiler-introduced temporaries.
+For such procedures, the register/frame allocator proactively spills
+variables with large live ranges, cutting down on the size and cost
+of building the conflict graph used to represent pairs of variables
+that are live at the same time and therefore cannot share a location.
 
 \subsection{Improved oblist management (9.3.3)}
 

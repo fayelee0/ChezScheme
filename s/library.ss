@@ -27,8 +27,6 @@
    (generate-interrupt-trap #f)
    ($track-dynamic-closure-counts #f))
 
-"library.ss (includes #<void> just before)"
-
 (eval-when (compile)
 (define-syntax define-library-entry
   (lambda (x)
@@ -130,8 +128,6 @@
 
 ;;; set up $nuate for overflow
 (define $nuate ($closure-code (call/1cc (lambda (k) k))))
-
-"making closure counters!"
 
 (set! #{raw-ref-count bhowt6w0coxl0s2y-1} '#[#{profile-counter b5vnnom9h4o4uny0-2} 0])
 (set! #{raw-create-count bhowt6w0coxl0s2y-2} '#[#{profile-counter b5vnnom9h4o4uny0-2} 0])
@@ -304,6 +300,11 @@
   (define-library-entry (vector-length v)
     (vector-oops 'vector-length v))
 
+  (define-library-entry (vector-cas! v i old-x new-x)
+    (if (mutable-vector? v)
+        (index-oops 'vector-cas! v i)
+        (mutable-vector-oops 'vector-cas! v)))
+
   (define-library-entry (fxvector-ref v i)
     (if (fxvector? v)
         (index-oops 'fxvector-ref v i)
@@ -416,6 +417,9 @@
 (define-library-entry (set-box! b v)
   ($oops 'set-box! "~s is not a mutable box" b))
 
+(define-library-entry (box-cas! b old-v new-v)
+  ($oops 'box-cas! "~s is not a mutable box" b))
+
 (let ()
 (define (fxnonfixnum1 who x)
   ($oops who "~s is not a fixnum" x))
@@ -450,7 +454,7 @@
 (define-library-entry (fx<= x y) (fxnonfixnum2 'fx<= x y))
 (define-library-entry (fx>= x y) (fxnonfixnum2 'fx>= x y))
 (define-library-entry (fx=? x y) (fxnonfixnum2 'fx=? x y))
-(define-library-entry (fx<? x y) (fxnonfixnum2 'fx< x y))
+(define-library-entry (fx<? x y) (fxnonfixnum2 'fx<? x y))
 (define-library-entry (fx>? x y) (fxnonfixnum2 'fx>? x y))
 (define-library-entry (fx<=? x y) (fxnonfixnum2 'fx<=? x y))
 (define-library-entry (fx>=? x y) (fxnonfixnum2 'fx>=? x y))
@@ -1067,7 +1071,7 @@
           (let ([handler $signal-interrupt-handler])
             ($tc-field 'signal-interrupt-pending ($tc) #f)
             (keyboard)
-            (handler x))
+            (for-each handler ($dequeue-scheme-signals ($tc))))
           (keyboard))))
   (define (keyboard)
     (if ($tc-field 'keyboard-interrupt-pending ($tc))

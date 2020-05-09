@@ -334,6 +334,7 @@
         (export "ptr" "Smake_uninitialized_string" "(iptr)")
         (export "ptr" "Sstring" "(const char *)")
         (export "ptr" "Sstring_of_length" "(const char *, iptr)")
+        (export "ptr" "Sstring_utf8" "(const char*, iptr)")
         (export "ptr" "Sbox" "(ptr)")
         (export "ptr" "Sinteger" "(iptr)")
         (export "ptr" "Sunsigned" "(uptr)")
@@ -371,6 +372,7 @@
         (export "void" "Sset_verbose" "(int)")
         (export "void" "Sscheme_init" "(void (*)(void))")
         (export "void" "Sregister_boot_file" "(const char *)")
+        (export "void" "Sregister_boot_file_fd" "(const char *, int fd)")
         (export "void" "Sregister_heap_file" "(const char *)")
         (export "void" "Scompact_heap" "(void)")
         (export "void" "Ssave_heap" "(const char *, int)")
@@ -386,6 +388,14 @@
           (export "int" "Sactivate_thread" "(void)")
           (export "void" "Sdeactivate_thread" "(void)")
           (export "int" "Sdestroy_thread" "(void)")
+        )
+
+        (when-feature windows
+        (nl) (comment "Windows support.")
+          (pr "#include <wchar.h>~%")
+          (export "char *" "Sgetenv" "(const char *)")
+          (export "wchar_t *" "Sutf8_to_wide" "(const char *)")
+          (export "char *" "Swide_to_utf8" "(const wchar_t *)")
         )
 
         (nl) (comment "Features.")

@@ -1,4 +1,3 @@
-"expeditor.ss"
 ;;; expeditor.ss
 ;;; R. Kent Dybvig
 ;;; August 2007
@@ -82,8 +81,8 @@
              ee-beginning-of-entry ee-end-of-entry
              ee-delete-to-eol ee-delete-line
              ee-delete-between-point-and-mark ee-set-mark
-             ee-delete-entry ee-reset-entry ee-delete-sexp ee-redisplay
-             ee-yank-kill-buffer ee-yank-selection
+             ee-delete-entry ee-reset-entry ee-delete-sexp ee-backward-delete-sexp
+             ee-redisplay ee-yank-kill-buffer ee-yank-selection
              ee-string-macro ee-eof ee-delete-char ee-eof/delete-char
              ee-backward-delete-char ee-insert-paren
              ee-flash-matching-delimiter ee-goto-matching-delimiter

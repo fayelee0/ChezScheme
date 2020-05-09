@@ -33,10 +33,10 @@ fi
 case "$M" in
   a6fb) ;;
   a6le) ;;
-  a6ob) ;;
-  a6osx) ;;
   a6nb) ;;
   a6nt) ;;
+  a6ob) ;;
+  a6osx) ;;
   a6s2) ;;
   arm32le) ;;
   i3fb) ;;
@@ -50,10 +50,10 @@ case "$M" in
   ppc32le) ;;
   ta6fb) ;;
   ta6le) ;;
+  ta6nb) ;;
   ta6nt) ;;
   ta6ob) ;;
   ta6osx) ;;
-  ta6nb) ;;
   ta6s2) ;;
   tarm32le) ;;
   ti3fb) ;;
@@ -139,7 +139,6 @@ case $M in
     ;;
 esac
 
-
 workdir $W/s
 (cd $W/s; workln ../../s/Mf-$M Mf-$M)
 (cd $W/s; forceworkln Mf-$M Makefile)
@@ -173,6 +172,12 @@ for dir in `echo zlib` ; do
   fi
 done
 
+for dir in `echo lz4` ; do
+  if [ ! -e $W/$dir ] ; then
+    /bin/cp -R $dir $W/$dir
+  fi
+done
+
 workdir $W/boot
 workdir $W/boot/$M
 (cd $W/boot/$M; workln ../../../boot/$M/scheme.h scheme.h)
@@ -201,8 +206,8 @@ case $M in
   *nt)
     (cd $W/boot/$M; workln ../../../boot/$M/mainmd.obj mainmd.obj)
     (cd $W/boot/$M; workln ../../../boot/$M/mainmt.obj mainmt.obj)
-    (cd $W/boot/$M; workln ../../../boot/$M/csv941md.lib csv941md.lib)
-    (cd $W/boot/$M; workln ../../../boot/$M/csv941mt.lib csv941mt.lib)
+    (cd $W/boot/$M; workln ../../../boot/$M/csv953md.lib csv953md.lib)
+    (cd $W/boot/$M; workln ../../../boot/$M/csv953mt.lib csv953mt.lib)
     (cd $W/boot/$M; workln ../../../boot/$M/scheme.res scheme.res)
     ;;
   *)
@@ -217,8 +222,8 @@ case $M in
   *nt)
     (cd $W/bin/$M; workln ../../../bin/$M/scheme.exe scheme.exe)
     (cd $W/bin/$M; forceworkln2 scheme.exe petite.exe)
-    (cd $W/bin/$M; workln ../../../bin/$M/csv941.dll csv941.dll)
-    (cd $W/bin/$M; workln ../../../bin/$M/csv941.lib csv941.lib)
+    (cd $W/bin/$M; workln ../../../bin/$M/csv953.dll csv953.dll)
+    (cd $W/bin/$M; workln ../../../bin/$M/csv953.lib csv953.lib)
     ;;
   *)
     (cd $W/bin/$M; workln ../../../bin/$M/scheme scheme)
@@ -237,6 +242,16 @@ case $M in
     (cd $W/bin; forceworkln $M/petite petite)
     ;;
 esac
+
+workdir $W/bintar
+(cd $W/bintar; workln ../../bintar/Makefile Makefile)
+
+workdir $W/rpm
+(cd $W/rpm; workln ../../rpm/Makefile Makefile)
+
+workdir $W/pkg
+(cd $W/pkg; workln ../../pkg/Makefile Makefile)
+(cd $W/pkg; workln ../../pkg/rmpkg rmpkg)
 
 (cd $W; workln ../LOG LOG)
 (cd $W; forceworkln2 ../nanopass nanopass)

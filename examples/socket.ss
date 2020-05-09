@@ -16,7 +16,7 @@
 ;;; Requires from C library:
 ;;;   close, dup, execl, fork, kill, listen, tmpnam, unlink
 (case (machine-type)
-  [(i3le ti3le) (load-shared-object "libc.so.6")]
+  [(i3le ti3le a6le ta6le) (load-shared-object "libc.so.6")]
   [(i3osx ti3osx a6osx ta6osx) (load-shared-object "libc.dylib")]
   [else (load-shared-object "libc.so")])
 
@@ -217,7 +217,7 @@
           (printf "client:~%~a~%server:~%" (utf8->string bv))))))
 > (get)
 client:
-Chez Scheme Version 9.4.1
+Chez Scheme Version 9.5.1
 Copyright 1984-2017 Cisco Systems, Inc.
 
 >

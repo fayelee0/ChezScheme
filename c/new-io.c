@@ -27,6 +27,8 @@
 #endif /* WIN32 */
 #include <fcntl.h>
 #include "zlib.h"
+#include "lz4.h"
+#include "lz4hc.h"
 
 /* !!! UNLESS you enjoy spending endless days tracking down race conditions
    !!! involving the garbage collector, please note: DEACTIVATE and
@@ -53,14 +55,14 @@ static ptr new_open_output_fd_helper PROTO((const char *filename, INT mode,
              INT flags, INT no_create, INT no_fail, INT no_truncate,
              INT append, INT lock, INT replace, INT compressed));
 static INT lockfile PROTO((INT fd));
-static ptr make_gzxfile PROTO((int fd, gzFile file));
 static int is_valid_zlib_length(iptr count);
+static int is_valid_lz4_length(iptr count);
 
 /*
- not_ok_is_fatal: !ok definitely implies error, so ignore gzerror
+ not_ok_is_fatal: !ok definitely implies error, so ignore glzerror
  ok: whether the result of body seems to be ok
  flag: will be set when an error is detected and cleared if no error
- fd: the gzFile object to call gzerror on
+ fd: the glzFile object to call glzerror on
  body: the operation we are checking the error on
 */
 #ifdef EINTR
@@ -76,8 +78,8 @@ static int is_valid_zlib_length(iptr count);
     if (ok) { flag = 0; }                               \
     else {                                              \
       INT errnum;                                       \
-      gzerror((fd),&errnum);                            \
-      gzclearerr((fd));                                 \
+      S_glzerror((fd),&errnum);                         \
+      S_glzclearerr((fd));                              \
       if (errnum == Z_ERRNO) {                          \
         flag = errno != EINTR;                          \
       } else {                                          \
@@ -97,8 +99,8 @@ static int is_valid_zlib_length(iptr count);
     if (ok) { flag = 0; break; }                        \
     else {                                              \
       INT errnum;                                       \
-      gzerror((fd),&errnum);                            \
-      gzclearerr((fd));                                 \
+      S_glzerror((fd),&errnum);                         \
+      S_glzclearerr((fd));                              \
       if (errnum == Z_ERRNO) {                          \
         if (errno != EINTR) { flag = 1; break; }        \
       } else {                                          \
@@ -115,8 +117,8 @@ static int is_valid_zlib_length(iptr count);
     if (ok) { flag = 0; }                               \
     else {                                              \
       INT errnum;                                       \
-      gzerror((fd),&errnum);                            \
-      gzclearerr((fd));                                 \
+      S_glzerror((fd),&errnum);                         \
+      S_glzclearerr((fd));                              \
       if (errnum == Z_ERRNO) { flag = 1; }              \
       else {                                            \
         flag = not_ok_is_fatal || errnum != Z_OK;       \
@@ -143,33 +145,22 @@ static INT lockfile(INT fd) { return FLOCK(fd, LOCK_EX); }
 static INT lockfile(INT fd) { return lockf(fd, F_LOCK, (off_t)0); }
 #endif
 
-/* work around missing zlib API operation to extract a gzFile's fd */
-typedef struct {
-  int fd;
-  gzFile file;
-} gzxfile;
-#define gzxfile_fd(x) (((gzxfile *)&BVIT(x,0))->fd)
-#define gzxfile_gzfile(x) (((gzxfile *)&BVIT(x,0))->file)
-static ptr make_gzxfile(int fd, gzFile file) {
-  ptr bv;
+#define MAKE_GZXFILE(x) Sinteger((iptr)x)
+#define GZXFILE_GZFILE(x) ((glzFile)Sinteger_value(x))
 
-  bv = S_bytevector(sizeof(gzxfile));
-  gzxfile_fd(bv) = fd;
-  gzxfile_gzfile(bv) = file;
-  return bv;
-}
 INT S_gzxfile_fd(ptr x) {
-  return gzxfile_fd(x);
+  return GZXFILE_GZFILE(x)->fd;
 }
-gzFile S_gzxfile_gzfile(ptr x) {
-  return gzxfile_gzfile(x);
+
+glzFile S_gzxfile_gzfile(ptr x) {
+  return GZXFILE_GZFILE(x);
 }
 
 ptr S_new_open_input_fd(const char *infilename, IBOOL compressed) {
   char *filename;
   INT saved_errno = 0;
   INT fd, dupfd, error, result, ok, flag;
-  gzFile file;
+  glzFile file;
 #ifdef PTHREADS
   ptr tc = get_thread_context();
 #endif
@@ -207,25 +198,26 @@ ptr S_new_open_input_fd(const char *infilename, IBOOL compressed) {
     return Scons(FIX(OPEN_ERROR_OTHER), str);
   }
   
-  if ((file = gzdopen(dupfd, "rb")) == Z_NULL) {
+  DEACTIVATE(tc) /* glzdopen_input reads the magic word from the file */
+  if ((file = S_glzdopen_input(dupfd)) == Z_NULL) {
+    REACTIVATE(tc)
     FD_GUARD(result == 0, error, result = CLOSE(fd));
     FD_GUARD(result == 0, error, result = CLOSE(dupfd));
     return Scons(FIX(OPEN_ERROR_OTHER), Sstring("unable to allocate compression state (too many open files?)"));
   }
 
-  DEACTIVATE(tc)
-  compressed = !gzdirect(file);
+  compressed = !S_glzdirect(file);
   REACTIVATE(tc)
 
   if (compressed) {
     FD_GUARD(result == 0, error, result = CLOSE(fd));
-    /* box indicates gzip'd */
-    return Sbox(make_gzxfile(dupfd, file));
+    /* box indicates compressed */
+    return Sbox(MAKE_GZXFILE(file));
   }
 
-  GZ_GUARD(1, ok == 0 || ok == Z_BUF_ERROR, flag, file, ok = gzclose(file));
+  GZ_GUARD(1, ok == 0 || ok == Z_BUF_ERROR, flag, file, ok = S_glzclose(file));
   if (flag) {} /* make the compiler happy */
-  if (LSEEK(fd, 0, SEEK_SET) != 0) { /* gzdirect does not leave fd at position 0 */
+  if (LSEEK(fd, 0, SEEK_SET) != 0) { /* glzdopen and glzdirect might not leave fd at position 0 */
     FD_GUARD(result == 0, error, result = CLOSE(fd));
     return Scons(FIX(OPEN_ERROR_OTHER),Sstring("unable to reset after reading header bytes"));
   }
@@ -234,7 +226,7 @@ ptr S_new_open_input_fd(const char *infilename, IBOOL compressed) {
 
 ptr S_compress_input_fd(INT fd, I64 pos) {
   INT dupfd, error, result, ok, flag; IBOOL compressed;
-  gzFile file;
+  glzFile file;
 #ifdef PTHREADS
   ptr tc = get_thread_context();
 #endif
@@ -243,41 +235,42 @@ ptr S_compress_input_fd(INT fd, I64 pos) {
     return S_strerror(errno);
   }
   
-  if ((file = gzdopen(dupfd, "rb")) == Z_NULL) {
+  DEACTIVATE(tc)
+  if ((file = S_glzdopen_input(dupfd)) == Z_NULL) {
+    REACTIVATE(tc)
     FD_GUARD(result == 0, error, result = CLOSE(dupfd));
     return Sstring("unable to allocate compression state (too many open files?)");
   }
   
-  DEACTIVATE(tc)
-  compressed = !gzdirect(file);
+  compressed = !S_glzdirect(file);
   REACTIVATE(tc)
 
   if (compressed) {
     FD_GUARD(result == 0, error, result = CLOSE(fd));
     if (error) {} /* make the compiler happy */
-    return Sbox(make_gzxfile(dupfd, file));
+    /* box indicates compressed */
+    return Sbox(MAKE_GZXFILE(file));
   }
 
-  GZ_GUARD(1, ok == 0 || ok == Z_BUF_ERROR, flag, file, ok = gzclose(file));
+  GZ_GUARD(1, ok == 0 || ok == Z_BUF_ERROR, flag, file, ok = S_glzclose(file));
   if (flag) {} /* make the compiler happy */
-  if (LSEEK(fd, pos, SEEK_SET) != pos) { /* gzdirect does not leave fd at same position */
+  if (LSEEK(fd, pos, SEEK_SET) != pos) { /* glzdirect does not leave fd at same position */
     return Sstring("unable to reset after reading header bytes");
   }
   return MAKE_FD(fd);
 }
 
 ptr S_compress_output_fd(INT fd) {
-  gzFile file;
+  glzFile file;
+  ptr tc = get_thread_context();
 
-#ifdef WIN32
-  if ((file = gzdopen(fd, "wb")) == Z_NULL) {
-#else
-  if ((file = gzdopen(fd, (fcntl(fd, F_GETFL) & O_APPEND) ? "ab" : "wb")) == Z_NULL) {
-#endif
+  file = S_glzdopen_output(fd, (INT)UNFIX(COMPRESSFORMAT(tc)), (INT)UNFIX(COMPRESSLEVEL(tc)));
+
+  if (file == Z_NULL)
     return Sstring("unable to allocate compression state (too many open files?)");
-  }
 
-  return Sbox(make_gzxfile(fd, file));
+  /* box indicates compressed */
+  return Sbox(MAKE_GZXFILE(file));
 }
 
 static ptr new_open_output_fd_helper(
@@ -288,9 +281,7 @@ static ptr new_open_output_fd_helper(
   INT saved_errno = 0;
   iptr error;
   INT fd, result;
-#ifdef PTHREADS
   ptr tc = get_thread_context();
-#endif
 
   flags |=
     (no_create ? 0 : O_CREAT) |
@@ -347,14 +338,15 @@ static ptr new_open_output_fd_helper(
   if (!compressed) {
     return MAKE_FD(fd);
   }
-  
-  gzFile file = gzdopen(fd, append ? "ab" : "wb");
+
+  glzFile file;
+  file = S_glzdopen_output(fd, (INT)UNFIX(COMPRESSFORMAT(tc)), (INT)UNFIX(COMPRESSLEVEL(tc)));
   if (file == Z_NULL) {
     FD_GUARD(result == 0, error, result = CLOSE(fd));
     return Scons(FIX(OPEN_ERROR_OTHER), Sstring("unable to allocate compression state"));
   }
 
-  return make_gzxfile(fd, file);
+  return MAKE_GZXFILE(file);
 }
 
 ptr S_new_open_output_fd(
@@ -377,14 +369,14 @@ ptr S_new_open_input_output_fd(
     return new_open_output_fd_helper(
       filename, mode, O_BINARY | O_RDWR,
       no_create, no_fail, no_truncate,
-      append, lock, replace, compressed);
+      append, lock, replace, 0);
 }
 
 ptr S_close_fd(ptr file, IBOOL gzflag) {
   INT saved_errno = 0;
   INT ok, flag;
   INT fd = gzflag ? 0 : GET_FD(file);
-  gzFile gzfile = gzflag ? gzxfile_gzfile(file) : NULL;
+  glzFile gzfile = gzflag ? GZXFILE_GZFILE(file) : NULL;
 #ifdef PTHREADS
   ptr tc = get_thread_context();
 #endif
@@ -401,7 +393,7 @@ ptr S_close_fd(ptr file, IBOOL gzflag) {
     FD_GUARD(ok == 0, flag, ok = CLOSE(fd));
   } else {
    /* zlib 1.2.1 returns Z_BUF_ERROR when closing an empty file opened for reading */
-    GZ_GUARD(1, ok == 0 || ok == Z_BUF_ERROR, flag, gzfile, ok = gzclose(gzfile));
+    GZ_GUARD(1, ok == 0 || ok == Z_BUF_ERROR, flag, gzfile, ok = S_glzclose(gzfile));
   }
   saved_errno = errno;
   REACTIVATE(tc)
@@ -421,6 +413,26 @@ ptr S_close_fd(ptr file, IBOOL gzflag) {
 
 #ifdef WIN32
 #define IO_SIZE_T unsigned int
+static HANDLE hStdin = NULL;
+static iptr read_console(char* buf, unsigned size) {
+  static char u8buf[1024];
+  static int u8i = 0;
+  static int u8n = 0;
+  iptr n = 0;
+  do {
+    for (; size > 0 && u8n > 0; size--, u8n--, n++)
+      *buf++ = u8buf[u8i++];
+    if (n == 0 && size > 0) {
+      wchar_t wbuf[256];
+      DWORD wn;
+      if (!ReadConsoleW(hStdin, wbuf, 256, &wn, NULL) || wn == 0)
+        return 0;
+      u8n = WideCharToMultiByte(CP_UTF8, 0, wbuf, wn, u8buf, 1024, NULL, NULL);
+      u8i = 0;
+    }
+  } while (n == 0);
+  return n;
+}
 #else /* WIN32 */
 #define IO_SIZE_T size_t
 #endif /* WIN32 */
@@ -431,7 +443,7 @@ ptr S_bytevector_read(ptr file, ptr bv, iptr start, iptr count, IBOOL gzflag) {
   ptr tc = get_thread_context();
   iptr m, flag = 0;
   INT fd = gzflag ? 0 : GET_FD(file);
-  gzFile gzfile = gzflag ? gzxfile_gzfile(file) : NULL;
+  glzFile gzfile = gzflag ? GZXFILE_GZFILE(file) : NULL;
 
  /* file is not locked; do not reference after deactivating thread! */
   file = (ptr)-1;
@@ -442,17 +454,28 @@ ptr S_bytevector_read(ptr file, ptr bv, iptr start, iptr count, IBOOL gzflag) {
 
   LOCKandDEACTIVATE(tc, bv)
 #ifdef WIN32
-  if (!gzflag && fd == 0) {
+  if (!gzflag && fd == 0 && hStdin != NULL) {
     DWORD error_code;
     SetConsoleCtrlHandler(NULL, TRUE);
     SetLastError(0);
-    m = _read(0, &BVIT(bv,start), (IO_SIZE_T)count);
+    m = read_console(&BVIT(bv,start), (IO_SIZE_T)count);
     error_code = GetLastError();
-    SetConsoleCtrlHandler(NULL, FALSE);
     if (m == 0 && error_code == 0x3e3) {
+      /* Guard against Windows calling the ConsoleCtrlHandler after we
+       * turn it back on by waiting a bit. */
+      Sleep(1);
+#ifdef PTHREADS
+      /* threaded io.ss doesn't handle interrupts because
+       * with-tc-mutex disables them, so bail out. */
+      SetConsoleCtrlHandler(NULL, FALSE);
+      REACTIVATEandUNLOCK(tc, bv)
+      S_noncontinuable_interrupt();
+#else
       KEYBOARDINTERRUPTPENDING(tc) = Strue;
       SOMETHINGPENDING(tc) = Strue;
+#endif
     }
+    SetConsoleCtrlHandler(NULL, FALSE);
   } else
 #endif /* WIN32 */
   {
@@ -464,7 +487,7 @@ ptr S_bytevector_read(ptr file, ptr bv, iptr start, iptr count, IBOOL gzflag) {
       GZ_EINTR_GUARD(
         1, m >= 0 || Sboolean_value(KEYBOARDINTERRUPTPENDING(tc)),
         flag, gzfile,
-        m = gzread(gzfile, &BVIT(bv,start), (GZ_IO_SIZE_T)count));
+        m = S_glzread(gzfile, &BVIT(bv,start), (GZ_IO_SIZE_T)count));
     }
   }
   saved_errno = errno;
@@ -548,7 +571,7 @@ ptr S_bytevector_write(ptr file, ptr bv, iptr start, iptr count, IBOOL gzflag) {
   ptr tc = get_thread_context();
   INT flag = 0, saved_errno = 0;
   INT fd = gzflag ? 0 : GET_FD(file);
-  gzFile gzfile = gzflag ? gzxfile_gzfile(file) : NULL;
+  glzFile gzfile = gzflag ? GZXFILE_GZFILE(file) : NULL;
 
   for (s = start, c = count; c > 0; s += i, c -= i) {
     iptr cx = c;
@@ -566,7 +589,7 @@ ptr S_bytevector_write(ptr file, ptr bv, iptr start, iptr count, IBOOL gzflag) {
       GZ_EINTR_GUARD(
         i < 0, i > 0 || Sboolean_value(KEYBOARDINTERRUPTPENDING(tc)),
         flag, gzfile,
-        i = gzwrite(gzfile, &BVIT(bv,s), (GZ_IO_SIZE_T)cx));
+        i = S_glzwrite(gzfile, &BVIT(bv,s), (GZ_IO_SIZE_T)cx));
     } else {
       FD_EINTR_GUARD(i >= 0 || Sboolean_value(KEYBOARDINTERRUPTPENDING(tc)),
                      flag, i = WRITE(fd, &BVIT(bv,s), (IO_SIZE_T)cx));
@@ -610,7 +633,7 @@ ptr S_put_byte(ptr file, INT byte, IBOOL gzflag) {
   ptr tc = get_thread_context();
   INT flag = 0, saved_errno = 0;
   INT fd = gzflag ? 0 : GET_FD(file);
-  gzFile gzfile = gzflag ? gzxfile_gzfile(file) : NULL;
+  glzFile gzfile = gzflag ? GZXFILE_GZFILE(file) : NULL;
   octet buf[1];
 
   buf[0] = (octet)byte;
@@ -621,7 +644,7 @@ ptr S_put_byte(ptr file, INT byte, IBOOL gzflag) {
     GZ_EINTR_GUARD(
       i < 0, i > 0 || Sboolean_value(KEYBOARDINTERRUPTPENDING(tc)),
       flag, gzfile,
-      i = gzwrite(gzfile, buf, 1));
+      i = S_glzwrite(gzfile, buf, 1));
   } else {
     FD_EINTR_GUARD(i >= 0 || Sboolean_value(KEYBOARDINTERRUPTPENDING(tc)),
                    flag, i = WRITE(fd, buf, 1));
@@ -651,7 +674,7 @@ ptr S_put_byte(ptr file, INT byte, IBOOL gzflag) {
 ptr S_get_fd_pos(ptr file, IBOOL gzflag) {
   errno = 0;
   if (gzflag) {
-    z_off_t offset = gzseek(gzxfile_gzfile(file), 0, SEEK_CUR);
+    z_off_t offset = S_glzseek(GZXFILE_GZFILE(file), 0, SEEK_CUR);
     if (offset != -1) return Sinteger64(offset);
   } else {
     OFF_T offset = LSEEK(GET_FD(file), 0, SEEK_CUR);
@@ -670,7 +693,7 @@ ptr S_set_fd_pos(ptr file, ptr pos, IBOOL gzflag) {
     if (sizeof(z_off_t) != sizeof(I64))
       if (offset != offset64) return Sstring("invalid position");
     errno = 0;
-    if (gzseek(gzxfile_gzfile(file),offset,SEEK_SET) == offset) return Strue;
+    if (S_glzseek(GZXFILE_GZFILE(file),offset,SEEK_SET) == offset) return Strue;
     if (errno == 0) return Sstring("compression failed");
     return S_strerror(errno);
   } else {
@@ -778,10 +801,19 @@ void S_new_io_init() {
     S_set_symbol_value(S_intern((const unsigned char *)"$c-bufsiz"), Sinteger(SBUFSIZ));
   }
 #ifdef WIN32
+  { /* Get the console input handle for reading Unicode characters */
+    HANDLE h;
+    DWORD mode;
+    if ((h = GetStdHandle(STD_INPUT_HANDLE)) != INVALID_HANDLE_VALUE
+        && GetConsoleMode(h, &mode))
+      hStdin = h;
+  }
  /* transcoder, if any, does its own cr, lf translations */
   _setmode(_fileno(stdin), O_BINARY);
   _setmode(_fileno(stdout), O_BINARY);
   _setmode(_fileno(stderr), O_BINARY);
+  /* Set the console output to handle UTF-8 */
+  SetConsoleOutputCP(CP_UTF8);
 #endif /* WIN32 */
 }
 
@@ -791,58 +823,127 @@ static int is_valid_zlib_length(iptr count) {
   return count == (iptr)(uLong)count;
 }
 
+static int is_valid_lz4_length(iptr len) {
+  return (len <= LZ4_MAX_INPUT_SIZE);
+}
+
 /* Accept `iptr` because we expect it to represent a bytevector size,
    which always fits in `iptr`. Return `uptr`, because the result might
    not fit in `iptr`. */
-uptr S_bytevector_compress_size(iptr s_count) {
-  if (is_valid_zlib_length(s_count))
-    return compressBound((uLong)s_count);
-  else {
-    /* Compression will report "source too long" */
-    return 0;
+uptr S_bytevector_compress_size(iptr s_count, INT compress_format) {
+  switch (compress_format) {
+    case COMPRESS_GZIP:
+      if (is_valid_zlib_length(s_count))
+        return compressBound((uLong)s_count);
+      else {
+        /* Compression will report "source too long" */
+        return 0;
+      }
+    case COMPRESS_LZ4:
+      if (is_valid_lz4_length(s_count))
+        return LZ4_compressBound((uLong)s_count);
+      else {
+        /* Compression will report "source too long" */
+        return 0;
+      }
+    default:
+      S_error1("S_bytevector_compress_size", "unexpected compress format ~s", FIX(compress_format));
+      return 0;
   }
 }
 
 ptr S_bytevector_compress(ptr dest_bv, iptr d_start, iptr d_count,
-                          ptr src_bv, iptr s_start, iptr s_count) {
+                          ptr src_bv, iptr s_start, iptr s_count,
+                          INT compress_format) {
+  ptr tc = get_thread_context();
+  int compress_level = (INT)UNFIX(COMPRESSLEVEL(tc));
+
   /* On error, an message-template string with ~s for the bytevector */
-  int r;
-  uLong destLen;
+  switch (compress_format) {
+    case COMPRESS_GZIP:
+      {
+        int r;
+        uLong destLen;
 
-  if (!is_valid_zlib_length(s_count))
-    return Sstring("source bytevector ~s is too large");
+        if (!is_valid_zlib_length(s_count))
+          return Sstring("source bytevector ~s is too large");
 
-  destLen = (uLong)d_count;
+        destLen = (uLong)d_count;
 
-  r = compress(&BVIT(dest_bv, d_start), &destLen, &BVIT(src_bv, s_start), (uLong)s_count);
+        r = compress2(&BVIT(dest_bv, d_start), &destLen, &BVIT(src_bv, s_start), (uLong)s_count, S_zlib_compress_level(compress_level));
 
-  if (r == Z_OK)
-    return FIX(destLen);
-  else if (r == Z_BUF_ERROR)
-    return Sstring("destination bytevector is too small for compressed form of ~s");
-  else
-    return Sstring("internal error compressing ~s");
+        if (r == Z_OK)
+          return FIX(destLen);
+        else if (r == Z_BUF_ERROR)
+          return Sstring("destination bytevector is too small for compressed form of ~s");
+        else
+          return Sstring("internal error compressing ~s");
+      }
+    case COMPRESS_LZ4:
+      {
+        int destLen;
+
+        if (!is_valid_lz4_length(s_count))
+          return Sstring("source bytevector ~s is too large");
+
+        if (compress_level == COMPRESS_MIN) {
+          destLen = LZ4_compress_default((char *)&BVIT(src_bv, s_start), (char *)&BVIT(dest_bv, d_start), (int)s_count, (int)d_count);
+        } else {
+          destLen = LZ4_compress_HC((char *)&BVIT(src_bv, s_start), (char *)&BVIT(dest_bv, d_start), (int)s_count, (int)d_count, S_lz4_compress_level(compress_level));
+        }
+
+        if (destLen > 0)
+          return Sfixnum(destLen);
+        else
+          return Sstring("compression failed for ~s");
+      }
+    default:
+      S_error1("S_bytevector_compress", "unexpected compress format ~s", FIX(compress_format));
+      return Sfalse;
+  }
 }
 
 ptr S_bytevector_uncompress(ptr dest_bv, iptr d_start, iptr d_count,
-                            ptr src_bv, iptr s_start, iptr s_count) {
+                            ptr src_bv, iptr s_start, iptr s_count,
+                            INT compress_format) {
   /* On error, an message-template string with ~s for the bytevector */
-  int r;
-  uLongf destLen;
+  switch (compress_format) {
+    case COMPRESS_GZIP:
+      {
+        int r;
+        uLongf destLen;
 
-  if (!is_valid_zlib_length(d_count))
-    return Sstring("expected result size of uncompressed source ~s is too large");
+        if (!is_valid_zlib_length(d_count))
+          return Sstring("expected result size of uncompressed source ~s is too large");
 
-  destLen = (uLongf)d_count;
+        destLen = (uLongf)d_count;
 
-  r = uncompress(&BVIT(dest_bv, d_start), &destLen, &BVIT(src_bv, s_start), (uLong)s_count);
+        r = uncompress(&BVIT(dest_bv, d_start), &destLen, &BVIT(src_bv, s_start), (uLong)s_count);
 
-  if (r == Z_OK)
-    return FIX(destLen);
-  else if (r == Z_BUF_ERROR)
-    return Sstring("uncompressed ~s is larger than expected size");
-  else if (r == Z_DATA_ERROR)
-    return Sstring("invalid data in source bytevector ~s");
-  else
-    return Sstring("internal error uncompressing ~s");
+        if (r == Z_OK)
+          return FIX(destLen);
+        else if (r == Z_BUF_ERROR)
+          return Sstring("uncompressed ~s is larger than expected size");
+        else if (r == Z_DATA_ERROR)
+          return Sstring("invalid data in source bytevector ~s");
+        else
+          return Sstring("internal error uncompressing ~s");
+      }
+    case COMPRESS_LZ4:
+      {
+        int r;
+
+        if (!is_valid_lz4_length(d_count))
+          return Sstring("expected result size of uncompressed source ~s is too large");
+
+        r = LZ4_decompress_safe((char *)&BVIT(src_bv, s_start), (char *)&BVIT(dest_bv, d_start), (int)s_count, (int)d_count);
+
+        if (r >= 0)
+          return Sfixnum(r);
+        else
+          return Sstring("internal error uncompressing ~s");
+      }
+    default:
+      return Sstring("unepxected compress format ~s");
+  }
 }

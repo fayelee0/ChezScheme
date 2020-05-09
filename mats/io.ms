@@ -105,17 +105,21 @@
                       (let ([c (get-u8 p)])
                         (cons (integer->char c) (f)))))))))
           "a b c d e")
-  (equal? (call-with-port
-           (open-file-input-port "testfile.ss")
-           (lambda (p)
-             (list->string
-              (let f ()
-                (let ([c (lookahead-u8 p)])
-                  (if (eof-object? c)
-                      '()
-                      (let ([c (get-u8 p)])
-                        (cons (integer->char c) (f)))))))))
-          "a b c d e")
+  (andmap (lambda (p)
+            (equal? (call-with-port
+                     p
+                     (lambda (p)
+                       (list->string
+                        (let f ()
+                          (let ([c (lookahead-u8 p)])
+                            (if (eof-object? c)
+                                '()
+                                (let ([c (get-u8 p)])
+                                  (cons (integer->char c) (f)))))))))
+                    "a b c d e"))
+          (list (open-file-input-port "testfile.ss")
+                (open-bytevector-input-port '#vu8(97 32 98 32 99 32 100 32 101))
+                (open-bytevector-input-port (bytevector->immutable-bytevector '#vu8(97 32 98 32 99 32 100 32 101)))))
   ; test various errors related to input ports
   (begin (set! ip (open-file-input-port "testfile.ss"))
          (and (port? ip) (input-port? ip)))
@@ -1292,21 +1296,24 @@
     (define $bop (let-values ([(op get) (open-bytevector-output-port)]) (set-binary-port-output-buffer! op #vu8(1 2 3 4 5)) op))
     #t)
   ; textual input
-  (equal?
-    (let ([ip (open-string-input-port "hello")])
-      (let ([buffer0 (textual-port-input-buffer ip)]
-            [index0 (textual-port-input-index ip)]
-            [size0 (textual-port-input-size ip)]
-            [count0 (textual-port-input-count ip)])
-        (read-char ip)
-        (list
-          (list buffer0 index0 size0 count0)
-          (list
-            (textual-port-input-buffer ip)
-            (textual-port-input-index ip)
-            (textual-port-input-size ip)
-            (textual-port-input-count ip)))))
-    '(("hello" 0 5 5) ("hello" 1 5 4)))
+  (andmap (lambda (str)
+            (equal?
+             (let ([ip (open-string-input-port str)])
+               (let ([buffer0 (textual-port-input-buffer ip)]
+                     [index0 (textual-port-input-index ip)]
+                     [size0 (textual-port-input-size ip)]
+                     [count0 (textual-port-input-count ip)])
+                 (read-char ip)
+                 (list
+                  (list buffer0 index0 size0 count0)
+                  (list
+                   (textual-port-input-buffer ip)
+                   (textual-port-input-index ip)
+                   (textual-port-input-size ip)
+                   (textual-port-input-count ip)))))
+             '(("hello" 0 5 5) ("hello" 1 5 4))))
+          (list "hello"
+                (string->immutable-string "hello")))
   (equal?
     (let ([ip (open-string-input-port "hello")])
       (let ([buffer0 (textual-port-input-buffer ip)]
@@ -2126,7 +2133,63 @@
         (= q (custom-port-buffer-size)))))
 )
 
+(mat compress-parameters
+  (error? ; unsupported format
+    (compress-format 'foo))
+  (error? ; unsupported format
+    (compress-format "gzip"))
+  (eq? (compress-format) 'lz4)
+  (eq? (parameterize ([compress-format 'gzip]) (compress-format)) 'gzip)
+  (eq? (parameterize ([compress-format 'lz4]) (compress-format)) 'lz4)
+  (error? ; unsupported level
+    (compress-level 'foo))
+  (error? ; unsupported level
+    (compress-level 1))
+  (eq? (compress-level) 'medium)
+  (eq? (parameterize ([compress-level 'low]) (compress-level)) 'low)
+  (eq? (parameterize ([compress-level 'medium]) (compress-level)) 'medium)
+  (eq? (parameterize ([compress-level 'high]) (compress-level)) 'high)
+  (eq? (parameterize ([compress-level 'maximum]) (compress-level)) 'maximum)
+  (begin
+    (define (fnlength ifn) (call-with-port (open-file-input-port ifn) port-length))
+    (define (compress-file ifn ofn fmt lvl)
+      (call-with-port (open-file-input-port ifn)
+        (lambda (ip)
+          (call-with-port (parameterize ([compress-format fmt] [compress-level lvl])
+                            (open-file-output-port ofn (file-options compressed replace)))
+            (lambda (op) (put-bytevector op (get-bytevector-all ip))))))
+      (fnlength ofn))
+    (define (compress-file-test fmt)
+      (let ([orig (fnlength "prettytest.ss")]
+            [low (compress-file "prettytest.ss" "testfile.ss" fmt 'low)]
+            [medium (compress-file "prettytest.ss" "testfile.ss" fmt 'medium)]
+            [high (compress-file "prettytest.ss" "testfile.ss" fmt 'high)]
+            [maximum (compress-file "prettytest.ss" "testfile.ss" fmt 'maximum)])
+        (define-syntax test1
+          (syntax-rules ()
+            [(_ level)
+             (unless (< level orig) (errorf #f "~s ~s did not compress" fmt 'level))]))
+        (define-syntax test2
+          (syntax-rules ()
+            [(_ level1 level2)
+             (unless (<= level2 level1) (errorf #f "~s ~s did worse than ~s" fmt 'level2 'level1))]))
+        (test1 low)
+        (test1 medium)
+        (test1 high)
+        (test1 maximum)
+        (test2 low medium)
+        (test2 medium high)
+        (test2 high maximum)
+        (unless (< maximum low) (errorf #f "~s maximum didn't do better than low" fmt))))
+    (compress-file-test 'lz4)
+    (compress-file-test 'gzip)
+    #t)
+)
+
 (mat compression
+  (parameters [compress-format 'gzip 'lz4] [compress-level 'low 'medium 'high 'maximum])
+  (and (memq (compress-format) '(gzip lz4)) #t)
+  (and (memq (compress-level) '(low medium high maximum)) #t)
   (let ()
     (define cp
       (lambda (src dst)
@@ -3071,6 +3134,7 @@
 )
 
 (mat compression-textual
+  (parameters [compress-format 'gzip 'lz4] [compress-level 'low 'medium 'high 'maximum])
   (let ()
     (define cp
       (lambda (src dst)

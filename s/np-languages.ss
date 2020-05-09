@@ -21,12 +21,13 @@
     uvar-referenced? uvar-referenced! uvar-assigned? uvar-assigned!
     uvar-was-closure-ref? uvar-was-closure-ref!
     uvar-unspillable? uvar-spilled? uvar-spilled! uvar-local-save? uvar-local-save!
-    uvar-seen? uvar-seen! uvar-loop? uvar-loop!
+    uvar-seen? uvar-seen! uvar-loop? uvar-loop! uvar-poison? uvar-poison!
     uvar-in-prefix? uvar-in-prefix!
     uvar-location uvar-location-set!
     uvar-move* uvar-move*-set!
     uvar-conflict*
     uvar-ref-weight uvar-ref-weight-set! uvar-save-weight uvar-save-weight-set!
+    uvar-live-count uvar-live-count-set!
     uvar
     fv-offset
     var-spillable-conflict* var-spillable-conflict*-set!
@@ -76,10 +77,6 @@
 
   (import (nanopass))
   (include "base-lang.ss")
-
- ; convention is a symbol or #f (we're assuming the front end already verified
- ; the convention is a valid one for this machine-type
-  (define convention? (lambda (x) (or (symbol? x) (eq? #f x))))
 
  ; r6rs says a quote subform should be a datum, not must be a datum
  ; chez scheme allows a quote subform to be any value
@@ -161,6 +158,7 @@
     (loop               #b00001000000)
     (in-prefix          #b00010000000)
     (local-save         #b00100000000)
+    (poison             #b01000000000)
   )
 
   (define-record-type (uvar $make-uvar uvar?)
@@ -178,13 +176,14 @@
       (mutable iii)           ; inspector info index
       (mutable ref-weight)    ; must be a fixnum!
       (mutable save-weight)   ; must be a fixnum!
+      (mutable live-count)    ; must be a fixnum!
      )
     (nongenerative)
     (sealed #t)
     (protocol
       (lambda (pargs->new)
         (lambda (name source type conflict* flags)
-          ((pargs->new) name source type conflict* flags #f #f '() #f #f 0 0)))))
+          ((pargs->new) name source type conflict* flags #f #f '() #f #f 0 0 0)))))
   (define prelex->uvar
     (lambda (x)
       ($make-uvar (prelex-name x) (prelex-source x) 'ptr '()
@@ -413,7 +412,7 @@
     (Program (prog)
       (+ (labels ([l* le*] ...) l)                     => (labels ([l* le*] ...) (l))))
     (CaseLambdaExpr (le)
-      (+ (fcallable info)                              => (fcallable info)))
+      (+ (fcallable info l)                            => (fcallable info l)))
     (Lvalue (lvalue)
       (+ x
          (mref e1 e2 imm)))
@@ -485,10 +484,14 @@
   (declare-primitive asmlibcall! effect #f)
   (declare-primitive c-call effect #f)
   (declare-primitive c-simple-call effect #f)
+  (declare-primitive c-simple-return effect #f)
+  (declare-primitive deactivate-thread effect #f) ; threaded version only
   (declare-primitive fl* effect #f)
   (declare-primitive fl+ effect #f)
   (declare-primitive fl- effect #f)
   (declare-primitive fl/ effect #f)
+  (declare-primitive fldl effect #f) ; x86
+  (declare-primitive flds effect #f) ; x86
   (declare-primitive flsqrt effect #f) ; not implemented for some ppc32 (so we don't use it)
   (declare-primitive flt effect #f)
   (declare-primitive inc-cc-counter effect #f)
@@ -515,7 +518,9 @@
   (declare-primitive store-single effect #f)
   (declare-primitive store-single->double effect #f)
   (declare-primitive store-with-update effect #f) ; ppc
+  (declare-primitive unactivate-thread effect #f) ; threaded version only
   (declare-primitive vpush-multiple effect #f) ; arm
+  (declare-primitive cas effect #f)
 
   (declare-primitive < pred #t)
   (declare-primitive <= pred #t)
@@ -541,8 +546,10 @@
   (declare-primitive -/eq value #f)
   (declare-primitive asmlibcall value #f)
   (declare-primitive fstpl value #f) ; x86 only
+  (declare-primitive fstps value #f) ; x86 only
   (declare-primitive get-double value #t) ; x86_64
   (declare-primitive get-tc value #f) ; threaded version only
+  (declare-primitive activate-thread value #f) ; threaded version only
   (declare-primitive lea1 value #t)
   (declare-primitive lea2 value #t)
   (declare-primitive load value #t)
@@ -829,6 +836,7 @@
       (return-point info rpl mrvl (cnfv* ...))
       (rp-header mrvl fs lpm)
       (remove-frame info)
+      (restore-local-saves info)
       (shift-arg reg imm info)
       (set! lvalue rhs)
       (inline info effect-prim t* ...)            => (inline info effect-prim t* ...)
@@ -845,6 +853,7 @@
       (jump t (var* ...))
       (joto l (nfv* ...))
       (asm-return reg* ...)
+      (asm-c-return info reg* ...)
       (if p0 tl1 tl2)
       (seq e0 tl1)
       (goto l)))
@@ -949,6 +958,7 @@
       (return-point info rpl mrvl (cnfv* ...))
       (rp-header mrvl fs lpm)
       (remove-frame live-info info)
+      (restore-local-saves live-info info)
       (shift-arg live-info reg imm info)
       (set! live-info lvalue rhs)
       (inline live-info info effect-prim t* ...)
@@ -956,7 +966,8 @@
     (Tail (tl)
       (goto l)
       (jump live-info t (var* ...))
-      (asm-return reg* ...)))
+      (asm-return reg* ...)
+      (asm-c-return info reg* ...)))
 
   (define-language L15b (extends L15a)
     (terminals
@@ -967,15 +978,18 @@
          (label (l))))
     (Effect (e)
       (- (remove-frame live-info info)
+         (restore-local-saves live-info info)
          (return-point info rpl mrvl (cnfv* ...))
          (shift-arg live-info reg imm info)
          (check-live live-info reg* ...))
       (+ (fp-offset live-info imm)))
     (Tail (tl)
       (- (jump live-info t (var* ...))
-         (asm-return reg* ...))
+         (asm-return reg* ...)
+         (asm-c-return info reg* ...))
       (+ (jump live-info t)
-         (asm-return))))
+         (asm-return)
+         (asm-c-return info))))
 
   (define ur?
     (lambda (x)
